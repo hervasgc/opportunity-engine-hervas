@@ -41,13 +41,13 @@ def format_number(n, currency=False):
         
     return f"-{prefix}{formatted_num}" if is_negative else f"{prefix}{formatted_num}"
 
-def save_accuracy_plot(results_data, accuracy_df, output_path, kpi_name='Sessions'):
+def save_accuracy_plot(results_data, accuracy_df, output_path, kpi_name='kpi'):
     """Saves the model accuracy plot to a file, matching the reference style."""
     plt.style.use('seaborn-v0_8-whitegrid')
     fig, ax = plt.subplots(figsize=(18, 10))
     
     # Plot with specific styles
-    ax.plot(accuracy_df['Date'], accuracy_df['Sessions'], color='black', linestyle='-', label=f'Actual {kpi_name}')
+    ax.plot(accuracy_df['Date'], accuracy_df['kpi'], color='black', linestyle='-', label=f'Actual {kpi_name}')
     ax.plot(accuracy_df['Date'], accuracy_df['Predicted'], color='red', linestyle='--', label=f'Predicted {kpi_name} (In-Sample)')
     
     ax.set_title(f'Model Accuracy: Actual vs. Predicted (Pre-Event Period)', fontsize=18, pad=20)
@@ -67,14 +67,14 @@ def save_accuracy_plot(results_data, accuracy_df, output_path, kpi_name='Session
     plt.savefig(output_path)
     plt.close(fig)
 
-def save_line_chart_plot(line_df, output_path, kpi_name='Sessions'):
+def save_line_chart_plot(line_df, output_path, kpi_name='kpi'):
     """Saves the causal impact line chart with investment overlay to a file."""
     plt.style.use('seaborn-v0_8-whitegrid')
     fig, ax1 = plt.subplots(figsize=(18, 10))
 
     # Plotting the KPI data on the primary y-axis (ax1)
-    ax1.plot(line_df['Date'], line_df['Actual Sessions'], color='black', linestyle='-', label=f'Actual {kpi_name}')
-    ax1.plot(line_df['Date'], line_df['Forecasted Sessions'], color='red', linestyle='--', label=f'Forecasted {kpi_name}')
+    ax1.plot(line_df['Date'], line_df['Actual_KPI'], color='black', linestyle='-', label=f'Actual {kpi_name}')
+    ax1.plot(line_df['Date'], line_df['Forecasted_KPI'], color='red', linestyle='--', label=f'Forecasted {kpi_name}')
     ax1.set_xlabel('Date', fontsize=14)
     ax1.set_ylabel(kpi_name, fontsize=14)
     ax1.tick_params(axis='y')
@@ -111,7 +111,7 @@ def save_investment_bar_plot(inv_bar_df, output_path):
     plt.savefig(output_path)
     plt.close(fig)
 
-def save_sessions_bar_plot(sessions_bar_df, output_path, kpi_name='Sessions'):
+def save_sessions_bar_plot(sessions_bar_df, output_path, kpi_name='kpi'):
     """Saves the sessions bar chart to a file."""
     plt.style.use('seaborn-v0_8-whitegrid')
     fig, ax = plt.subplots(figsize=(10, 7))
@@ -141,7 +141,7 @@ def save_sessions_bar_plot(sessions_bar_df, output_path, kpi_name='Sessions'):
 
 def save_opportunity_curve_plot(response_curve_df, baseline_point, max_efficiency_point,
                                 diminishing_return_point, saturation_point, filename,
-                                kpi_name='Sessions', strategic_limit_point=None, config=None):
+                                kpi_name='kpi', strategic_limit_point=None, config=None):
     """
     Saves the saturation curve plot with smart labeling using ax.annotate.
     """
@@ -204,15 +204,21 @@ def save_opportunity_curve_plot(response_curve_df, baseline_point, max_efficienc
                     arrowprops=dict(arrowstyle="->", connectionstyle="arc3,rad=0.1", color=color))
 
     # 4. Plotting Strategic Points
+    # Use different offsets to prevent overlap if points coincide
     plot_point(baseline_point, 'gray', 'Cenário Atual',
-               marker='o', size=150, xytext=(0, -50))
+               marker='o', size=150, xytext=(0, -60))
 
+    # If Max Efficiency is the same as Baseline, offset its label upwards
+    max_eff_offset = (0, 60) if max_efficiency_point and baseline_point and \
+                      abs(max_efficiency_point.get('Daily_Investment', 0) - baseline_point.get('Daily_Investment', 0)) < 1e-3 \
+                      else (0, -60)
+    
     plot_point(max_efficiency_point, 'red', 'Máxima Eficiência',
-               marker='*', size=250, xytext=(0, -50))
+               marker='*', size=250, xytext=max_eff_offset)
 
     if strategic_limit_point:
         plot_point(strategic_limit_point, 'green', 'Limite Estratégico',
-                   marker='X', size=150, xytext=(0, -50))
+                   marker='X', size=150, xytext=(0, -60))
 
     if diminishing_return_point:
          plot_point(diminishing_return_point, 'orange', 'Retorno Decrescente',

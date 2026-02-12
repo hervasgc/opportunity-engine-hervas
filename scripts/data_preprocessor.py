@@ -67,16 +67,23 @@ def load_and_prepare_data(config):
 
         
         # --- Dynamically Rename Columns ---
+        user_kpi_col = config.get('performance_kpi_column', 'Sessions')
         kpi_df.rename(columns={
             perf_map.get('date_col', 'date'): 'Date',
-            perf_map.get('kpi_col', config['performance_kpi_column']): 'Sessions'
+            perf_map.get('kpi_col', user_kpi_col): 'kpi'
         }, inplace=True)
 
-        # --- Clean percentage strings and convert to numeric ---
-        if kpi_df['Sessions'].dtype == 'object':
-            kpi_df['Sessions'] = kpi_df['Sessions'].str.replace('%', '', regex=False).str.replace(',', '.', regex=False)
-        kpi_df['Sessions'] = pd.to_numeric(kpi_df['Sessions'], errors='coerce')
-
+        # --- Clean percentage/thousands strings and convert to numeric ---
+        if kpi_df['kpi'].dtype == 'object':
+            # Handle potential string formatting (e.g. '1.234,56' or '1,234.56')
+            # If thousands=',' was used in read_csv, pandas might have already handled it if it matched.
+            # But let's be safe for cases where it's mixed with symbols.
+            kpi_df['kpi'] = kpi_df['kpi'].str.replace('%', '', regex=False)
+            # If there are still commas and dots, we need to know the locale. 
+            # Assuming standard numeric if read_csv thousands worked.
+            kpi_df['kpi'] = pd.to_numeric(kpi_df['kpi'].str.replace(',', '', regex=False), errors='coerce')
+        
+        kpi_df['kpi'] = pd.to_numeric(kpi_df['kpi'], errors='coerce')
 
         daily_investment_df.rename(columns={
             inv_map.get('date_col', 'dates'): 'Date',
@@ -92,7 +99,7 @@ def load_and_prepare_data(config):
         daily_investment_df['Date'] = pd.to_datetime(daily_investment_df['Date'], format=date_formats.get('investment_file'), errors='coerce')
 
         # --- Data Cleaning & Validation ---
-        kpi_df.dropna(subset=['Date', 'Sessions'], inplace=True)
+        kpi_df.dropna(subset=['Date', 'kpi'], inplace=True)
         daily_investment_df.dropna(subset=['Date', 'investment', 'Product Group'], inplace=True)
 
         # --- Conditional Outlier Treatment ---
@@ -102,26 +109,27 @@ def load_and_prepare_data(config):
             if isinstance(outlier_config, list):
                 # Treat specific columns listed in config
                 for col in outlier_config:
-                    if col in kpi_df.columns:
-                        kpi_df = treat_outliers(kpi_df, col)
+                    # Map 'Sessions' or user column to 'kpi' if that's what was intended
+                    target_col = 'kpi' if col == user_kpi_col or col == 'Sessions' else col
+                    if target_col in kpi_df.columns:
+                        kpi_df = treat_outliers(kpi_df, target_col)
                         print(f"     - Treated outliers in KPI column: '{col}'")
-                    # Note: Could extend to investment_df if needed, but keeping scope to KPI for now
             elif isinstance(outlier_config, bool) and outlier_config:
                 # Default to treating the KPI column
-                kpi_df = treat_outliers(kpi_df, 'Sessions')
-                print(f"     - Treated outliers in KPI column: 'Sessions'")
+                kpi_df = treat_outliers(kpi_df, 'kpi')
+                print(f"     - Treated outliers in KPI column: 'kpi'")
 
         # --- Debug: Print Date Ranges ---
         print(f"   - KPI Data Date Range: {kpi_df['Date'].min()} to {kpi_df['Date'].max()}")
         print(f"   - Investment Data Date Range: {daily_investment_df['Date'].min()} to {daily_investment_df['Date'].max()}")
         # --- End Debug ---
 
-        kpi_df = kpi_df[['Date', 'Sessions']].sort_values(by='Date').reset_index(drop=True)
+        kpi_df = kpi_df[['Date', 'kpi']].sort_values(by='Date').reset_index(drop=True)
         daily_investment_df = daily_investment_df[['Date', 'Product Group', 'investment']].sort_values(by='Date').reset_index(drop=True)
 
         print("   - Data loaded and columns renamed successfully.")
         
-        kpi_col = 'Sessions'
+        kpi_col = 'kpi'
         
         # --- Adstock Transformation ---
         print("   - Checking for negative correlations and applying adstock where needed...")
@@ -140,7 +148,7 @@ def load_and_prepare_data(config):
         
         # --- Final Correlation Matrix (for display) ---
         final_pivot = daily_investment_df.pivot_table(index='Date', columns='Product Group', values='investment').fillna(0)
-        final_merged = pd.merge(kpi_df.rename(columns={'Sessions': 'kpi'}), final_pivot, on='Date', how='inner')
+        final_merged = pd.merge(kpi_df, final_pivot, on='Date', how='inner')
         if not trends_df.empty:
             final_merged = pd.merge(final_merged, trends_df, on='Date', how='left')
         correlation_matrix = final_merged.corr(numeric_only=True)

@@ -31,7 +31,7 @@ def geometric_decay(series, alpha):
     """Applies geometric decay for ad-stock using lfilter for efficiency."""
     return lfilter([1], [1, -alpha], series)
 
-def create_calendar_features(df):
+def create_calendar_features(df, country_code='BR'):
     """Creates time-series features from a datetime index."""
     df_featured = df.copy()
     df_featured['dayofweek'] = df_featured.index.dayofweek
@@ -39,8 +39,13 @@ def create_calendar_features(df):
     df_featured['is_weekend'] = (df_featured.index.dayofweek >= 5).astype(int)
     df_featured['is_payday_period'] = ((df_featured.index.day >= 1) & (df_featured.index.day <= 5) |
                                      (df_featured.index.day >= 15) & (df_featured.index.day <= 20)).astype(int)
-    br_holidays = holidays.Brazil()
-    df_featured['is_holiday'] = df_featured.index.map(lambda date: date in br_holidays).astype(int)
+    
+    try:
+        country_holidays = holidays.CountryHoliday(country_code)
+        df_featured['is_holiday'] = df_featured.index.map(lambda date: date in country_holidays).astype(int)
+    except Exception:
+        df_featured['is_holiday'] = 0
+
     for i in range(7):
         df_featured[f'day_{i}'] = (df_featured['dayofweek'] == i).astype(int)
     return df_featured
@@ -128,19 +133,19 @@ def find_events(df, company_name, increase_ratio, decrease_ratio, post_event_day
         print(f"❌ Error processing data for event detection. Please check your input file columns. Details: {e}")
         return pd.DataFrame(), None, None
 
-def run_causal_impact_analysis(kpi_df, daily_investment_df, market_trends_df, performance_df, pre_period, post_period, event_name, product_group, model_params):
+def run_causal_impact_analysis(kpi_df, daily_investment_df, market_trends_df, performance_df, pre_period, post_period, event_name, product_group, model_params, config):
     try:
         data = kpi_df.copy()
         data['Date'] = pd.to_datetime(data['Date'])
-        data['Sessions'] = pd.to_numeric(data['Sessions'], errors='coerce').dropna()
-        if data['Sessions'].empty:
-            raise ValueError("The 'Sessions' column contains no valid numeric data.")
+        data['kpi'] = pd.to_numeric(data['kpi'], errors='coerce').dropna()
+        if data['kpi'].empty:
+            raise ValueError("The 'kpi' column contains no valid numeric data.")
 
         investment_pivot_df = daily_investment_df.pivot_table(
             index='Date', columns='Product Group', values='investment'
         ).fillna(0)
 
-        model_data = pd.merge(data[['Date', 'Sessions']], investment_pivot_df, on='Date', how='inner')
+        model_data = pd.merge(data[['Date', 'kpi']], investment_pivot_df, on='Date', how='inner')
         model_data = pd.merge(model_data, market_trends_df, on='Date', how='left')
         
         # --- Start of New Dynamic Code ---
@@ -174,7 +179,9 @@ def run_causal_impact_analysis(kpi_df, daily_investment_df, market_trends_df, pe
         model_data.set_index('Date', inplace=True)
         model_data.sort_index(inplace=True)
         model_data.fillna(0, inplace=True)
-        model_data = create_calendar_features(model_data)
+        
+        country_code = config.get('country_code', 'BR')
+        model_data = create_calendar_features(model_data, country_code=country_code)
 
         event_channels = [ch.strip() for ch in product_group.split(',')]
         event_investment_series = model_data[event_channels].sum(axis=1)
@@ -218,32 +225,36 @@ def run_causal_impact_analysis(kpi_df, daily_investment_df, market_trends_df, pe
         if not varianced_features:
             selected_features = list(transformed_features.keys())
         else:
-            lasso = LassoCV(cv=5, random_state=0, max_iter=10000).fit(pre_data_for_model[varianced_features], pre_data_for_model['Sessions'])
+            # Scale features for LassoCV to handle different scales (e.g. Trends vs transformed investment)
+            scaler_lasso = MinMaxScaler()
+            X_lasso_scaled = scaler_lasso.fit_transform(pre_data_for_model[varianced_features])
+            
+            lasso = LassoCV(cv=5, random_state=0, max_iter=10000).fit(X_lasso_scaled, pre_data_for_model['kpi'])
             selected_features = [var for i, var in enumerate(varianced_features) if lasso.coef_[i] != 0]
             if not selected_features:
                 selected_features = list(transformed_features.keys())
 
         print(f"   - Selected features for causal model: {selected_features}")
-        model = sm.tsa.UnobservedComponents(pre_data_for_model['Sessions'], 'llevel', trend=True, seasonal=7, exog=pre_data_for_model[selected_features]).fit(disp=False)
+        model = sm.tsa.UnobservedComponents(pre_data_for_model['kpi'], 'llevel', trend=True, seasonal=7, exog=pre_data_for_model[selected_features]).fit(disp=False)
         
         in_sample_preds = model.get_prediction(exog=pre_data_for_model[selected_features]).predicted_mean
-        mae = np.mean(np.abs(pre_data_for_model['Sessions'] - in_sample_preds))
-        mape = (mae / pre_data_for_model['Sessions'].mean()) * 100 if pre_data_for_model['Sessions'].mean() > 0 else 0
-        ss_res = np.sum((pre_data_for_model['Sessions'] - in_sample_preds)**2)
-        ss_tot = np.sum((pre_data_for_model['Sessions'] - np.mean(pre_data_for_model['Sessions']))**2)
+        mae = np.mean(np.abs(pre_data_for_model['kpi'] - in_sample_preds))
+        mape = (mae / pre_data_for_model['kpi'].mean()) * 100 if pre_data_for_model['kpi'].mean() > 0 else 0
+        ss_res = np.sum((pre_data_for_model['kpi'] - in_sample_preds)**2)
+        ss_tot = np.sum((pre_data_for_model['kpi'] - np.mean(pre_data_for_model['kpi']))**2)
         r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
         print(f"   - Causal model R-squared (in-sample): {r_squared:.4f}")
         
         accuracy_df = pre_data_for_model.copy()
         accuracy_df['Predicted'] = in_sample_preds.shift(-1)
-        accuracy_df = accuracy_df[['Sessions', 'Predicted']].reset_index().tail(90)
+        accuracy_df = accuracy_df[['kpi', 'Predicted']].reset_index().tail(90)
         
         forecast = model.get_forecast(steps=len(post_data), exog=post_data[selected_features])
         predicted_mean = forecast.predicted_mean
         
-        impact_df = post_data[['Sessions']].copy()
+        impact_df = post_data[['kpi']].copy()
         impact_df['predicted'] = predicted_mean.values
-        impact_df['impact'] = impact_df['Sessions'] - impact_df['predicted']
+        impact_df['impact'] = impact_df['kpi'] - impact_df['predicted']
         impact_df.fillna(0, inplace=True)
         
         _, p_value = stats.ttest_1samp(impact_df['impact'], 0)
@@ -283,14 +294,14 @@ def run_causal_impact_analysis(kpi_df, daily_investment_df, market_trends_df, pe
         chart_start = start_date - pd.to_timedelta(start_date.dayofweek + 7, unit='d')
         chart_end = end_date + pd.to_timedelta(6 - end_date.dayofweek + 7, unit='d')
 
-        actuals_for_chart = pd.merge(model_data.loc[chart_start:chart_end, ['Sessions']].reset_index(), event_investment_agg[(event_investment_agg['Date'] >= chart_start) & (event_investment_agg['Date'] <= chart_end)], on='Date', how='left').fillna(0)
+        actuals_for_chart = pd.merge(model_data.loc[chart_start:chart_end, ['kpi']].reset_index(), event_investment_agg[(event_investment_agg['Date'] >= chart_start) & (event_investment_agg['Date'] <= chart_end)], on='Date', how='left').fillna(0)
         actuals_for_chart.rename(columns={'investment': 'Total_Investment'}, inplace=True)
         
-        forecast_for_chart = pd.DataFrame({'Date': post_data.index, 'Forecasted Sessions': predicted_mean.values})
-        line_chart_df = pd.merge(actuals_for_chart, forecast_for_chart, on='Date', how='left').rename(columns={'Sessions': 'Actual Sessions', 'Total_Investment': 'Investment'})
+        forecast_for_chart = pd.DataFrame({'Date': post_data.index, 'Forecasted_KPI': predicted_mean.values})
+        line_chart_df = pd.merge(actuals_for_chart, forecast_for_chart, on='Date', how='left').rename(columns={'kpi': 'Actual_KPI', 'Total_Investment': 'Investment'})
         
         investment_bar_df = pd.DataFrame({'Period': ['Pre-Event', 'Event'], 'Investment': [total_investment_pre_period, total_investment_post_period]}).set_index('Period')
-        sessions_bar_df = pd.DataFrame({'Category': ['Forecasted', 'Actual'], 'Sessions': [predicted_mean.sum(), post_data['Sessions'].sum()]}).set_index('Category')
+        sessions_bar_df = pd.DataFrame({'Category': ['Forecasted', 'Actual'], 'kpi': [predicted_mean.sum(), post_data['kpi'].sum()]}).set_index('Category')
         
         results_dict = {"start_date": post_period[0], "end_date": post_period[1], "product_group": product_group, "absolute_lift": abs_lift, "relative_lift_pct": rel_lift, "p_value": p_value, "investment_change_pct": investment_change_pct, "cpa_incremental": cpa_incremental, "total_investment_post_period": total_investment_post_period, "total_investment_pre_period": total_investment_pre_period, "mae": mae, "mape": mape, "model_r_squared": r_squared, "event_period_avg_investment": event_period_avg_investment}
         
@@ -299,7 +310,7 @@ def run_causal_impact_analysis(kpi_df, daily_investment_df, market_trends_df, pe
         print(f"❌ An unexpected error occurred during causal impact analysis: {e}")
         return None, None, None, None, None
 
-def _train_response_model(model_data, product_group):
+def _train_response_model(model_data, product_group, config):
     """
     Trains the ad-stock and saturation model on INCREMENTAL KPIs by first
     modeling and subtracting the baseline performance.
@@ -313,12 +324,13 @@ def _train_response_model(model_data, product_group):
 
     # --- 1. Model and Subtract Baseline KPI ---
     print("   - Modeling baseline KPI using non-investment features...")
-    model_data_featured = create_calendar_features(model_data.copy())
+    country_code = config.get('country_code', 'BR')
+    model_data_featured = create_calendar_features(model_data.copy(), country_code=country_code)
     
     baseline_features = [col for col in model_data_featured.columns if 'day_' in col or col in ['is_weekend', 'is_payday_period', 'is_holiday', 'Generic Searches']]
     X_base = model_data_featured[baseline_features]
     X_base = sm.add_constant(X_base)
-    y_base = model_data_featured['Sessions']
+    y_base = model_data_featured['kpi']
     
     baseline_model = sm.OLS(y_base, X_base).fit()
     baseline_kpi_predictions = baseline_model.predict(X_base)
@@ -397,13 +409,13 @@ def run_opportunity_projection(kpi_df, daily_investment_df, market_trends_df, pr
     
     try:
         investment_pivot_df = daily_investment_df.copy().pivot_table(index='Date', columns='Product Group', values='investment').fillna(0)
-        model_data = pd.merge(kpi_df[['Date', 'Sessions']], investment_pivot_df, on='Date', how='inner')
+        model_data = pd.merge(kpi_df[['Date', 'kpi']], investment_pivot_df, on='Date', how='inner')
         model_data = pd.merge(model_data, market_trends_df, on='Date', how='left')
         model_data.set_index('Date', inplace=True)
         model_data.sort_index(inplace=True)
         model_data.fillna(0, inplace=True)
 
-        best_alpha, best_k, best_s, max_kpi_scaler, hist_avg_investment, hist_avg_kpi, model_params, channel_proportions = _train_response_model(model_data, product_group)
+        best_alpha, best_k, best_s, max_kpi_scaler, hist_avg_investment, hist_avg_kpi, model_params, channel_proportions = _train_response_model(model_data, product_group, config)
         
         investment_limit_factor = config.get('investment_limit_factor', 2.0)
         max_hist_inv = daily_investment_df['investment'].max()
@@ -529,7 +541,7 @@ def find_optimal_historical_mix(kpi_df, daily_investment_df):
     weekly_df['Total_Investment'] = weekly_df[investment_pivot.columns].sum(axis=1)
     
     # Use a 4-week rolling window to smooth out anomalies and capture sustained impact
-    rolling_kpi = weekly_df['Sessions'].rolling(window=4, min_periods=1).sum()
+    rolling_kpi = weekly_df['kpi'].rolling(window=4, min_periods=1).sum()
     rolling_investment = weekly_df['Total_Investment'].rolling(window=4, min_periods=1).sum()
     
     weekly_df['Efficiency_Ratio'] = (rolling_kpi / rolling_investment).fillna(0)

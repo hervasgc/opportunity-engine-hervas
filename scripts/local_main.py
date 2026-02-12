@@ -25,7 +25,7 @@ import analysis
 import google_api
 import recommendations
 import saturation_curve
-import mmm_analysis
+import elasticity_analysis
 from gemini_report import generate_html_report, generate_global_gemini_report
 from presentation import save_accuracy_plot, save_line_chart_plot, save_investment_bar_plot, save_sessions_bar_plot, save_opportunity_curve_plot, create_comparative_saturation_md, save_investment_distribution_donuts
 
@@ -132,9 +132,9 @@ def main(config, args):
         performance_df.rename(columns={date_col: 'Date'}, inplace=True)
         # --- End New Code ---
 
-        kpi_col = config.get('performance_kpi_column', 'Sessions')
+        kpi_col = config.get('performance_kpi_column', 'kpi')
 
-        market_analysis_df = pd.merge(kpi_df.rename(columns={'Sessions': config['advertiser_name']}), trends_df, on='Date', how='left').fillna(0)
+        market_analysis_df = pd.merge(kpi_df.rename(columns={'kpi': config['advertiser_name']}), trends_df, on='Date', how='left').fillna(0)
 
 
         increase_ratio = 1 + (config['increase_threshold_percent'] / 100)
@@ -195,7 +195,7 @@ def main(config, args):
                         print(f"\n" + "-"*50 + f"\n▶ Analyzing Event: {event['product_group']} on {event['intervention_date']}")
                         
                         results_data, line_df, inv_bar_df, sessions_bar_df, accuracy_df = analysis.run_causal_impact_analysis(
-                            kpi_df, daily_investment_df, trends_df, performance_df, pre_period, post_period, event['event_id'], event['product_group'], projection_model_params
+                            kpi_df, daily_investment_df, trends_df, performance_df, pre_period, post_period, event['event_id'], event['product_group'], projection_model_params, config
                         )
 
                         if not results_data:
@@ -316,9 +316,9 @@ def main(config, args):
         # --- New Global Analysis Workflow using Elasticity Model ---
         print("\n" + "="*50 + "\n📈 Starting Global Elasticity Analysis...\n" + "="*50)
         
-        mmm_results = mmm_analysis.run_mmm_engine(config)
+        elasticity_results = elasticity_analysis.run_elasticity_engine(config)
         
-        if mmm_results:
+        if elasticity_results:
             investment_pivot_df = daily_investment_df.pivot_table(
                 index='Date', columns='Product Group', values='investment'
             ).fillna(0).reset_index()
@@ -329,7 +329,7 @@ def main(config, args):
             (
                 response_curve_df, baseline_point, max_efficiency_point, 
                 strategic_limit_point, diminishing_return_point, saturation_point
-            ) = mmm_analysis.generate_aggregated_response_curve(mmm_results, config)
+            ) = elasticity_analysis.generate_aggregated_response_curve(elasticity_results, config)
             
             # --- DYNAMICALLY SET TOTAL INVESTMENT FROM MODEL BASELINE ---
             total_monthly_investment = 0
@@ -341,7 +341,7 @@ def main(config, args):
             save_opportunity_curve_plot(
                 response_curve_df, baseline_point, max_efficiency_point, 
                 diminishing_return_point, saturation_point, plot_filename, 
-                kpi_name=config.get('performance_kpi_column', 'Sessions'),
+                kpi_name=config.get('performance_kpi_column', 'kpi'),
                 strategic_limit_point=strategic_limit_point,
                 config=config
             )
@@ -353,8 +353,8 @@ def main(config, args):
             optimized_budget_split = analysis.find_optimal_historical_mix(kpi_df, daily_investment_df)
             if not optimized_budget_split: optimized_budget_split = {}
 
-            # The MMM model returns contributions as percentages (0-100). Normalize to ratios (0-1).
-            strategic_budget_split_pct = mmm_results['contribution_pct']
+            # The Elasticity model returns contributions as percentages (0-100). Normalize to ratios (0-1).
+            strategic_budget_split_pct = elasticity_results['contribution_pct']
             strategic_budget_split_ratio = {k: v / 100.0 for k, v in strategic_budget_split_pct.items()}
 
             scenarios = [
@@ -401,7 +401,7 @@ def main(config, args):
 
             generate_global_gemini_report(gemini_client, config, scenarios, kpi_projections=kpi_projections)
         else:
-            print("   - ❌ ERROR: Global MMM analysis failed. Skipping global report generation.")
+            print("   - ❌ ERROR: Global Elasticity analysis failed. Skipping global report generation.")
 
     except FileNotFoundError as e:
 

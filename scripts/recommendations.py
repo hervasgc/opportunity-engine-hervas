@@ -11,9 +11,9 @@ import presentation # Changed from relative import
 
 # --- Budget Scenario Generation ---
 
-def generate_mmm_budget_scenarios(contribution_pct, total_budget):
+def generate_elasticity_budget_scenarios(contribution_pct, total_budget):
     """
-    Calculates budget split based on MMM contribution percentages.
+    Calculates budget split based on Elasticity contribution percentages.
     Ensures the total adds up perfectly.
     """
     if not contribution_pct or sum(contribution_pct.values()) == 0:

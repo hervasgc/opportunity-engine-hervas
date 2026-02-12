@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-This module contains the functions for running a Marketing Mix Model (MMM)
+This module contains the functions for running a Elasticity Analysis (Elasticity)
 to determine the optimal budget allocation based on historical data.
 """
 
@@ -11,10 +11,12 @@ import numpy as np
 from sklearn.linear_model import Ridge
 from sklearn.model_selection import KFold
 from sklearn.metrics import r2_score
+from sklearn.preprocessing import MinMaxScaler
 from scipy.optimize import minimize
 import matplotlib.pyplot as plt
 import os
 import sys
+import holidays
 
 # Add the script's directory to the Python path to allow for relative imports
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -22,12 +24,41 @@ import data_preprocessor
 
 # --- Core Transformation Functions ---
 
+def create_calendar_features(df, country_code='BR'):
+    """Creates time-series features from a datetime index."""
+    df_featured = df.copy()
+    if 'Date' not in df_featured.columns:
+        return df_featured
+    
+    df_featured['Date'] = pd.to_datetime(df_featured['Date'])
+    df_featured.set_index('Date', inplace=True)
+    
+    # Month features (one-hot encoded)
+    for m in range(1, 13):
+        df_featured[f'month_{m}'] = (df_featured.index.month == m).astype(int)
+    
+    # Is Weekend
+    df_featured['is_weekend'] = (df_featured.index.dayofweek >= 5).astype(int)
+    
+    # Is Payday Period (common surge periods)
+    df_featured['is_payday_period'] = ((df_featured.index.day >= 1) & (df_featured.index.day <= 5) |
+                                     (df_featured.index.day >= 15) & (df_featured.index.day <= 20)).astype(int)
+    
+    # Holidays (Configurable country)
+    try:
+        country_holidays = holidays.CountryHoliday(country_code)
+        df_featured['is_holiday'] = df_featured.index.map(lambda date: date in country_holidays).astype(int)
+    except Exception:
+        # Fallback to no holidays if country code is invalid
+        df_featured['is_holiday'] = 0
+    
+    df_featured.reset_index(inplace=True)
+    return df_featured
+
 def geometric_adstock(spend, alpha, max_len=12):
-    """Applies a geometric adstock transformation."""
-    adstocked_spend = np.zeros_like(spend, dtype=float)
-    for i in range(len(spend)):
-        for j in range(min(i + 1, max_len)):
-            adstocked_spend[i] += alpha**j * spend[i - j]
+    """Applies a geometric adstock transformation using vectorization for speed."""
+    weights = alpha ** np.arange(max_len)
+    adstocked_spend = np.convolve(spend, weights, mode='full')[:len(spend)]
     return adstocked_spend
 
 def hill_transform(spend, k, s):
@@ -69,9 +100,9 @@ def hill_transform(spend, k, s):
 
 # --- Model Objective Function ---
 
-def mmm_objective_function(params, df, kpi_col, spend_cols, other_features):
+def elasticity_objective_function(params, df, kpi_col, spend_cols, other_features):
     """
-    The objective function to minimize for the MMM (negative R-squared).
+    The objective function to minimize for the Elasticity (negative R-squared).
     It calculates the negative R-squared of a Ridge regression model.
     """
     num_channels = len(spend_cols)
@@ -92,11 +123,15 @@ def mmm_objective_function(params, df, kpi_col, spend_cols, other_features):
     X = transformed_df[X_cols].fillna(0)
     y = transformed_df[kpi_col].fillna(0)
 
-    # Use K-Fold for cross-validation (better for attribution on short/noisy history)
-    tscv = KFold(n_splits=5, shuffle=True, random_state=42)
+    # Use MinMaxScaler to keep all features in [0, 1] range for stability with Ridge penalty
+    scaler = MinMaxScaler()
+    X_scaled = scaler.fit_transform(X)
+
+    # Use K-Fold for cross-validation
+    tscv = KFold(n_splits=3, shuffle=True, random_state=42)
     scores = []
-    for train_index, test_index in tscv.split(X):
-        X_train, X_test = X.iloc[train_index], X.iloc[test_index]
+    for train_index, test_index in tscv.split(X_scaled):
+        X_train, X_test = X_scaled[train_index], X_scaled[test_index]
         y_train, y_test = y.iloc[train_index], y.iloc[test_index]
         
         model = Ridge(alpha=ridge_alpha, positive=True) # Coefficients must be positive
@@ -107,14 +142,14 @@ def mmm_objective_function(params, df, kpi_col, spend_cols, other_features):
     # We want to maximize R-squared, so we minimize its negative
     return -np.mean(scores)
 
-# --- Main MMM Function ---
+# --- Main Elasticity Function ---
 
-def run_mmm_engine(config):
+def run_elasticity_engine(config):
     """
-    Main engine to run the MMM analysis and return model results.
+    Main engine to run the elasticity analysis and return model results.
     """
     print("="*50)
-    print("📈 Starting Unified Marketing Mix Model (MMM) Engine...")
+    print("📈 Starting Unified Elasticity Analysis Engine...")
     print("="*50)
 
     print("   - Loading and preparing data...")
@@ -129,20 +164,24 @@ def run_mmm_engine(config):
         df = pd.merge(df, kpi_df, on='Date', how='left')
         if trends_df is not None and not trends_df.empty:
             df = pd.merge(df, trends_df, on='Date', how='left')
+        
+        # Add calendar features to create a robust baseline
+        country_code = config.get('country_code', 'BR')
+        df = create_calendar_features(df, country_code=country_code)
         df = df.fillna(0)
 
     except Exception as e:
         print(f"   - ❌ ERROR: Failed to load or prepare data. Details: {e}")
         return None
 
-    kpi_col = 'Sessions'
+    kpi_col = 'kpi'
     spend_cols = [col for col in investment_pivot_df.columns]
     
-    trend_cols = []
-    if trends_df is not None:
-        trend_cols = [col for col in trends_df.columns if col != 'Date']
-    other_features = [col for col in df.columns if col in trend_cols]
-
+    # Identify trend and calendar features
+    calendar_cols = [col for col in df.columns if col.startswith('month_') or col in ['is_weekend', 'is_payday_period', 'is_holiday']]
+    trend_cols = [col for col in df.columns if col == 'Generic Searches']
+    
+    other_features = trend_cols + calendar_cols
     print(f"   - KPI: {kpi_col}")
     print(f"   - Modeled Channels: {spend_cols}")
     print(f"   - Other Features: {other_features}")
@@ -165,10 +204,10 @@ def run_mmm_engine(config):
                      [1.0]
 
     result = minimize(
-        mmm_objective_function, initial_params,
+        elasticity_objective_function, initial_params,
         args=(df, kpi_col, active_spend_cols, other_features),
         bounds=bounds, method='L-BFGS-B',
-        options={'maxiter': 1000, 'disp': False}
+        options={'maxiter': 500, 'disp': False}
     )
 
     if not result.success:
@@ -178,7 +217,7 @@ def run_mmm_engine(config):
     best_score = -result.fun
     print(f"   - ✅ Optimization complete! Best Model R-squared (Cross-Validated): {best_score:.4f}")
 
-    print("   - Training final model and calculating channel contributions...")
+    print("   - Training final model with non-negative constraints...")
     num_active_channels = len(active_spend_cols)
     final_alphas = optimal_params[:num_active_channels]
     final_ks = optimal_params[num_active_channels:2*num_active_channels]
@@ -195,22 +234,66 @@ def run_mmm_engine(config):
     X = transformed_df[X_cols].fillna(0)
     y = transformed_df[kpi_col].fillna(0)
 
-    final_model = Ridge(alpha=final_ridge_alpha, positive=True)
-    final_model.fit(X, y)
+    scaler = MinMaxScaler()
+    X_scaled = scaler.fit_transform(X)
+
+    # Enforce non-negative coefficients and intercept for business logic consistency
+    def ridge_loss_constrained(weights_and_intercept, X_in, y_in, alpha):
+        w = weights_and_intercept[:-1]
+        b = weights_and_intercept[-1]
+        preds = np.dot(X_in, w) + b
+        return np.sum((y_in - preds)**2) + alpha * np.sum(w**2)
+
+    initial_guess = np.append(np.ones(X_scaled.shape[1]) * 0.1, y.mean())
+    bounds_fit = [(0.0, None)] * (X_scaled.shape[1] + 1) # All coefs and intercept >= 0
+
+    fit_result = minimize(
+        ridge_loss_constrained, initial_guess,
+        args=(X_scaled, y.values, final_ridge_alpha),
+        bounds=bounds_fit, method='L-BFGS-B'
+    )
+
+    final_w_scaled = fit_result.x[:-1]
+    final_intercept_scaled = fit_result.x[-1]
+
+    # Back-calculate unscaled coefficients and intercept for consistency with simulation logic
+    safe_range = np.where(scaler.data_range_ == 0, 1.0, scaler.data_range_)
+    unscaled_coefs = final_w_scaled / safe_range
+    unscaled_intercept = final_intercept_scaled - np.sum(final_w_scaled * scaler.data_min_ / safe_range)
+
+    # Replace the model object with one that has the unscaled attributes
+    final_model = Ridge()
+    final_model.coef_ = unscaled_coefs
+    final_model.intercept_ = unscaled_intercept
+
+    print("\n   --- Elasticity Model Decomposition ---")
+    print(f"   - Intercept (Base): {final_model.intercept_:,.2f}")
+    
+    start_idx = len(active_spend_cols)
+    if other_features:
+        for idx, feature in enumerate(other_features):
+            coef = final_model.coef_[start_idx + idx]
+            feat_contrib = (coef * transformed_df[feature]).sum()
+            print(f"   - Feature {feature}: {feat_contrib:,.2f} (Coef: {coef:.4f})")
 
     contributions = {}
     for i, col in enumerate(active_spend_cols):
         contributions[col] = final_model.coef_[i] * transformed_df[col + '_transformed'].sum()
+        print(f"   - Channel {col}: {contributions[col]:,.2f} (Coef: {final_model.coef_[i]:.4f})")
     
     # Add zero contributions for inactive channels
     for col in inactive_spend_cols:
         contributions[col] = 0.0
 
-    total_contribution = sum(contributions.values())
-    contribution_pct = {k: (v / total_contribution) * 100 if total_contribution > 0 else 0 for k, v in contributions.items()}
+    total_marketing_contribution = sum(contributions.values())
+    total_y = y.sum()
+    print(f"   - Total Marketing Contribution: {total_marketing_contribution:,.2f} ({total_marketing_contribution/total_y:.2%})")
+    print(f"   - Total KPI (Actual): {total_y:,.2f}")
+
+    contribution_pct = {k: (v / total_marketing_contribution) * 100 if total_marketing_contribution > 0 else 0 for k, v in contributions.items()}
 
     print("\n" + "="*50)
-    print("✅ MMM Engine Run Complete.")
+    print("✅ Elasticity Engine Run Complete.")
     print("="*50)
 
     return {
@@ -226,22 +309,22 @@ def run_mmm_engine(config):
         "other_features": other_features
     }
 
-def plot_response_curves(mmm_results, config):
+def plot_response_curves(elasticity_results, config):
     """
-    Generates and saves response curve plots based on MMM results.
+    Generates and saves response curve plots based on Elasticity results.
     """
-    output_dir = os.path.join(config['output_directory'], config['advertiser_name'], 'mmm_analysis')
+    output_dir = os.path.join(config['output_directory'], config['advertiser_name'], 'elasticity_analysis')
     os.makedirs(output_dir, exist_ok=True)
     print(f"   - Saving response curve plots to: {output_dir}")
 
-    spend_cols = mmm_results['spend_cols']
-    kpi_col = mmm_results['kpi_col']
-    df = mmm_results['dataframe']
-    final_model = mmm_results['model']
+    spend_cols = elasticity_results['spend_cols']
+    kpi_col = elasticity_results['kpi_col']
+    df = elasticity_results['dataframe']
+    final_model = elasticity_results['model']
     
-    alphas = mmm_results['optimal_params']['alphas']
-    ks = mmm_results['optimal_params']['ks']
-    ss = mmm_results['optimal_params']['ss']
+    alphas = elasticity_results['optimal_params']['alphas']
+    ks = elasticity_results['optimal_params']['ks']
+    ss = elasticity_results['optimal_params']['ss']
 
     for i, col in enumerate(spend_cols):
         # Only plot for active channels that were part of the optimization
@@ -262,19 +345,19 @@ def plot_response_curves(mmm_results, config):
         else:
             print(f"   - Skipping response curve plot for inactive channel: {col}")
 
-def generate_aggregated_response_curve(mmm_results, config):
+def generate_aggregated_response_curve(elasticity_results, config):
     """
     Generates an aggregated response curve by simulating varying levels of total investment
     distributed according to the historical average mix.
     """
-    print("   - Generating aggregated response curve from MMM results...")
+    print("   - Generating aggregated response curve from Elasticity results...")
     
-    df = mmm_results['dataframe']
-    spend_cols = mmm_results['spend_cols']
-    optimal_params = mmm_results['optimal_params']
-    final_model = mmm_results['model']
+    df = elasticity_results['dataframe']
+    spend_cols = elasticity_results['spend_cols']
+    optimal_params = elasticity_results['optimal_params']
+    final_model = elasticity_results['model']
     
-    # Identify active channels (same logic as in run_mmm_engine)
+    # Identify active channels (same logic as in run_elasticity_engine)
     active_spend_cols = [col for col in spend_cols if df[col].mean() > 0]
     
     # Calculate average daily spend per channel (historical baseline)
@@ -300,7 +383,7 @@ def generate_aggregated_response_curve(mmm_results, config):
         adstock_factors[col] = dummy_adstock[-1] # Steady state factor
     
     # --- Calculate Baseline Contribution from Other Features ---
-    other_features = mmm_results.get('other_features', [])
+    other_features = elasticity_results.get('other_features', [])
     non_marketing_contribution = 0
     if other_features:
         # Calculate mean values for other features
@@ -470,7 +553,7 @@ def generate_aggregated_response_curve(mmm_results, config):
     return response_curve_df, baseline_point, max_efficiency_point, strategic_limit_point, diminishing_return_point, saturation_point
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Unified Marketing Mix Model (MMM) Analyzer")
+    parser = argparse.ArgumentParser(description="Unified Elasticity Analysis Analyzer")
     parser.add_argument("--config", required=True, help="Path to the JSON configuration file.")
     args = parser.parse_args()
 
@@ -485,9 +568,9 @@ if __name__ == "__main__":
         exit(1)
 
     # When run directly, execute the engine and then plot the curves
-    mmm_results = run_mmm_engine(config)
-    if mmm_results:
-        plot_response_curves(mmm_results, config)
-        print("\n   --- Historical Contribution Split (MMM) ---")
-        for channel, pct in sorted(mmm_results['contribution_pct'].items(), key=lambda item: item[1], reverse=True):
+    elasticity_results = run_elasticity_engine(config)
+    if elasticity_results:
+        plot_response_curves(elasticity_results, config)
+        print("\n   --- Historical Contribution Split (Elasticity) ---")
+        for channel, pct in sorted(elasticity_results['contribution_pct'].items(), key=lambda item: item[1], reverse=True):
             print(f"     - {channel}: {pct:.2f}%")
