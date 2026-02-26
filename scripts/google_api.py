@@ -68,7 +68,7 @@ def authenticate_gemini(api_key):
     """Authenticates the Gemini client using an API key."""
     try:
         genai.configure(api_key=api_key)
-        gemini_client = genai.GenerativeModel('gemini-2.5-pro')
+        gemini_client = genai.GenerativeModel('gemini-3.1-pro-preview')
         print("✅ Gemini client authenticated successfully.")
         return gemini_client
     except Exception as e:
