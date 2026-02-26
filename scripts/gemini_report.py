@@ -463,7 +463,7 @@ def generate_global_gemini_report(gemini_client, config, scenarios=None, total_i
 
     # --- 4. Call Gemini API ---
     try:
-        model = genai.GenerativeModel('gemini-1.5-pro')
+        model = genai.GenerativeModel('gemini-3.1-pro-preview')
         response = gemini_client.generate_content(prompt)
         cleaned_response_text = response.text.strip().replace('```json\n', '').replace('\n```', '')
         narrative = json.loads(cleaned_response_text)
