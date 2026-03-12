@@ -26,7 +26,7 @@ def _get_image_as_base64(path):
         print(f"   - ⚠️ WARNING: Could not read image file at {path}. Error: {e}")
         return None
 
-def _generate_full_report_narrative(gemini_client, results_data, config, market_analysis_df, scenarios_df, csv_output_filename=None, correlation_matrix=None):
+def _generate_full_report_narrative(gemini_client, results_data, config, market_analysis_df, csv_output_filename=None, correlation_matrix=None):
     """
     Generates the entire report narrative with a single, comprehensive prompt.
     """
@@ -36,17 +36,29 @@ def _generate_full_report_narrative(gemini_client, results_data, config, market_
     avg_ticket = config.get('average_ticket', config.get('average_ticket_value', 0))
     business_impact_sales = results_data.get('absolute_lift', 0) * config.get('conversion_rate_from_kpi_to_bo', 0)
     
+    # --- Efficiency & Causal Calculations ---
+    inv_post = results_data.get('total_investment_post_period', 0)
+    inv_change_pct = results_data.get('investment_change_pct', 0)
+    baseline_inv_post = inv_post / (1 + (inv_change_pct / 100)) if inv_change_pct != -100 else 0
+    incremental_investment = inv_post - baseline_inv_post
+    
     # --- DYNAMIC LOGIC ---
     if avg_ticket > 0:
         business_impact_value = business_impact_sales * avg_ticket
         business_impact_label = "incremental_revenue"
         business_impact_formatted_value = format_number(business_impact_value, currency=True)
         recommendation_kpi = "receita incremental"
+        
+        roi = (business_impact_value - incremental_investment) / incremental_investment if incremental_investment > 0 else 0
+        efficiency_metric = f"ROI Incremental: {roi:.2f}x" if incremental_investment > 0 else "N/A (Investimento Reduzido)"
     else:
         business_impact_value = business_impact_sales
         business_impact_label = "incremental_orders"
         business_impact_formatted_value = f"{business_impact_value:,.0f} pedidos"
         recommendation_kpi = "pedidos incrementais"
+        
+        cpa = incremental_investment / business_impact_value if business_impact_value > 0 else 0
+        efficiency_metric = f"CPA Incremental: {format_number(cpa, currency=True)}" if business_impact_value > 0 else "N/A (S/ Lift Positivo)"
     # --- END DYNAMIC LOGIC ---
 
     # Consolidate data into a dictionary for easy serialization
@@ -59,16 +71,17 @@ def _generate_full_report_narrative(gemini_client, results_data, config, market_
             "product_group": results_data['product_group'],
             "is_significant": str(results_data['p_value'] < config['p_value_threshold']),
             "p_value": f"{results_data['p_value']:.4f}",
-            "investment_change_pct": f"{results_data['investment_change_pct']:.1f}%",
+            "investment_change_pct": f"{inv_change_pct:.1f}%",
+            "incremental_investment": format_number(incremental_investment, currency=True),
             "absolute_lift_kpi": f"{results_data['absolute_lift']:,.0f}",
             business_impact_label: business_impact_formatted_value,
+            "efficiency_metric": efficiency_metric
         },
         "model_validation_metrics": {
             "r_squared": f"{results_data.get('model_r_squared', 0):.2f}",
             "mae": f"{results_data.get('mae', 0):.2f}",
             "mape": f"{results_data.get('mape', 0):.2f}%"
-        },
-        "investment_scenarios": scenarios_df.to_string() if scenarios_df is not None else "N/A",
+        }
     }
 
     if csv_output_filename and os.path.exists(csv_output_filename):
@@ -79,23 +92,16 @@ def _generate_full_report_narrative(gemini_client, results_data, config, market_
     json_schema = f"""
     {{
       "report_title": "A concise, executive-level title for the report.",
-      "part1_value_delivered": {{
-        "narrative": "A paragraph summarizing the proven past impact (Part 1 of TO Framework). It must quantify the incremental lift in business terms ({recommendation_kpi}) using the provided data.",
-        "methodology_narrative": "A brief, executive-friendly explanation of the statsmodels.tsa.UnobservedComponents methodology."
-      }},
-      "part2_projected_impact": {{
-        "narrative": "An introductory paragraph for the investment forecast and scenario table (Part 2 of TO Framework)."
-      }},
-      "part3_investment_opportunity": {{
-        "title": "A strong, action-oriented title for the investment recommendation.",
-        "recommendation_narrative": "The core investment recommendation (Part 3 of TO Framework), clearly stating the budget and the expected incremental result ({recommendation_kpi}).",
-        "highlight_narrative": "A short, impactful paragraph for the 'Incremental Gain' highlight box.",
-        "strategic_rationale_narrative": "The strategic 'why' behind the recommendation, explaining the response curve and sweet spot to justify the efficiency of the proposed investment."
+      "executive_verdict": "A clear, decisive statement on whether the investment change was a strategic success or failure based on efficiency and ROI/CPA.",
+      "detailed_analysis": "A deep dive into the investment vs. return. Analyze if the increased/decreased spend was justified by the proportional change in {recommendation_kpi}. Discuss the efficiency of the incremental spend.",
+      "value_delivered": {{
+        "narrative": "A paragraph summarizing the proven past impact. It must quantify the incremental lift in business terms ({recommendation_kpi}) using the provided data.",
+        "methodology_narrative": "A brief, executive-friendly explanation of the statsmodels.tsa.UnobservedComponents methodology used for the causal impact analysis."
       }},
       "next_steps": [
-        {{ "step": "Step 1 Title", "description": "A strategic, actionable recommendation based on the analysis results." }},
-        {{ "step": "Step 2 Title", "description": "A second strategic, actionable recommendation." }},
-        {{ "step": "Step 3 Title", "description": "A third strategic, actionable recommendation." }}
+        {{ "step": "Step 1 Title", "description": "A tactical, actionable recommendation on what to do next given this specific outcome (e.g., scale further, pull back, investigate creative)." }},
+        {{ "step": "Step 2 Title", "description": "A second tactical, actionable recommendation." }},
+        {{ "step": "Step 3 Title", "description": "A third tactical, actionable recommendation." }}
       ]
     }}
     """
@@ -103,11 +109,11 @@ def _generate_full_report_narrative(gemini_client, results_data, config, market_
     # --- 3. Construct the final prompt ---
     prompt = f"""
     As a senior Google marketing strategist, your task is to create a comprehensive business report for {prompt_data['client_name']}.
-    The report must follow the three-part "Total Opportunity" framework: Part 1 (Value Delivered), Part 2 (Projected Impact), and Part 3 (Investment Opportunity).
+    The report should focus on the "Value Delivered", proving the past impact of the marketing intervention and analyzing its efficiency.
 
     **CRITICAL INSTRUCTION: Your entire output must be in Brazilian Portuguese (pt-BR).**
 
-    Analyze all the provided data to generate a cohesive and insightful narrative. Your entire output must be a single, valid JSON object matching the schema provided below. Do not include any text before or after the JSON object.
+    Analyze all the provided data, paying special attention to the `efficiency_metric`, to generate a cohesive and insightful narrative. Your entire output must be a single, valid JSON object matching the schema provided below. Do not include any text before or after the JSON object.
 
     **DATA FOR ANALYSIS:**
     ```json
@@ -138,11 +144,78 @@ A matriz de correlação entre o investimento diário total e os KPIs de negóci
         return narrative
     except Exception as e:
         print(f"   - ❌ ERROR: Could not generate or parse the full narrative from Gemini. Details: {e}")
-        return json.loads(json_schema.replace('...', 'Error generating content.'))
+        return json.loads(json_schema.replace('...', 'Error: Could not generate content.'))
 
-def generate_html_report(gemini_client, results_data, config, image_paths, output_filename, market_analysis_df, causal_impact_df, scenarios_df, channel_proportions, csv_output_filename=None, correlation_matrix=None):
+def generate_markdown_report_from_narrative(narrative, results_data, config, output_filename):
     """
-    Generates a self-contained HTML report using the AI-generated narrative.
+    Generates a clean, causal-impact focused RECOMMENDATIONS.md from the Gemini narrative.
+    """
+    print(f"   - Generating Markdown report to '{output_filename}'...")
+    
+    report_title = narrative.get('report_title', 'Recomendações de Investimento e Impacto Causal')
+    executive_verdict = narrative.get('executive_verdict', '')
+    detailed_analysis = narrative.get('detailed_analysis', '')
+    value_delivered = narrative.get('value_delivered', {}).get('narrative', '')
+    
+    # Calculate efficiency metrics
+    inv_post = results_data.get('total_investment_post_period', 0)
+    inv_change_pct = results_data.get('investment_change_pct', 0)
+    baseline_inv_post = inv_post / (1 + (inv_change_pct / 100)) if inv_change_pct != -100 else 0
+    incremental_investment = inv_post - baseline_inv_post
+    
+    avg_ticket = config.get('average_ticket', config.get('average_ticket_value', 0))
+    business_impact_sales = results_data.get('absolute_lift', 0) * config.get('conversion_rate_from_kpi_to_bo', 0)
+    
+    metrics_md = ""
+    if avg_ticket > 0:
+        business_impact_value = business_impact_sales * avg_ticket
+        roi = (business_impact_value - incremental_investment) / incremental_investment if incremental_investment > 0 else 0
+        metrics_md = (
+            f"- **Investimento Incremental:** {format_number(incremental_investment, currency=True)}\n"
+            f"- **Receita Incremental:** {format_number(business_impact_value, currency=True)}\n"
+            f"- **ROI Incremental:** {roi:.2f}x\n"
+        )
+    else:
+        business_impact_value = business_impact_sales
+        cpa = incremental_investment / business_impact_value if business_impact_value > 0 else 0
+        metrics_md = (
+            f"- **Investimento Incremental:** {format_number(incremental_investment, currency=True)}\n"
+            f"- **Pedidos Incrementais:** {format_number(business_impact_value)}\n"
+            f"- **CPA Incremental:** {format_number(cpa, currency=True)}\n"
+        )
+
+    next_steps_md = "## Próximos Passos Estratégicos\n\n"
+    if narrative.get('next_steps') and isinstance(narrative['next_steps'], list):
+        for item in narrative['next_steps']:
+            if isinstance(item, dict):
+                next_steps_md += f"### {item.get('step', '')}\n{item.get('description', '')}\n\n"
+
+    md_content = f"""# {report_title}
+
+## Veredito Executivo
+**{executive_verdict}**
+
+## Métricas de Eficiência Incremental
+{metrics_md}
+
+## Análise Aprofundada
+{detailed_analysis}
+
+## O Impacto Causal e Valor Entregue
+{value_delivered}
+
+{next_steps_md}
+"""
+    try:
+        with open(output_filename, 'w', encoding='utf-8') as f:
+            f.write(md_content)
+        print("   - ✅ Markdown report generated successfully.")
+    except Exception as e:
+        print(f"   - ❌ ERROR: Could not write Markdown report to file. Details: {e}")
+
+def generate_html_report(gemini_client, results_data, config, image_paths, output_filename, market_analysis_df, causal_impact_df, csv_output_filename=None, correlation_matrix=None):
+    """
+    Generates a self-contained HTML report using the AI-generated narrative for event impact.
     """
     print(f"   - Assembling Gemini HTML report to '{output_filename}'...")
 
@@ -150,97 +223,33 @@ def generate_html_report(gemini_client, results_data, config, image_paths, outpu
     image_b64s = {key: _get_image_as_base64(path) for key, path in image_paths.items() if path}
 
     # --- 2. AI Narrative Generation ---
-    narrative = _generate_full_report_narrative(gemini_client, results_data, config, market_analysis_df, scenarios_df, csv_output_filename=csv_output_filename, correlation_matrix=correlation_matrix)
+    narrative = _generate_full_report_narrative(gemini_client, results_data, config, market_analysis_df, csv_output_filename=csv_output_filename, correlation_matrix=correlation_matrix)
 
     # --- 3. Data Calculation for Tables ---
     avg_ticket = config.get('average_ticket', config.get('average_ticket_value', 0))
     business_impact_sales = results_data.get('absolute_lift', 0) * config.get('conversion_rate_from_kpi_to_bo', 0)
     business_impact_revenue = business_impact_sales * avg_ticket
 
+    inv_post = results_data.get('total_investment_post_period', 0)
+    inv_change_pct = results_data.get('investment_change_pct', 0)
+    baseline_inv_post = inv_post / (1 + (inv_change_pct / 100)) if inv_change_pct != -100 else 0
+    incremental_investment = inv_post - baseline_inv_post
+
+    incremental_investment_str = format_number(incremental_investment, currency=True)
+    if avg_ticket > 0:
+        business_impact_label_str = "Receita"
+        business_impact_str = format_number(business_impact_revenue, currency=True)
+        roi = (business_impact_revenue - incremental_investment) / incremental_investment if incremental_investment > 0 else 0
+        efficiency_label = "ROI Incremental"
+        efficiency_val = f"{roi:.2f}x" if incremental_investment > 0 else "N/A"
+    else:
+        business_impact_label_str = "Pedidos"
+        business_impact_str = format_number(business_impact_sales)
+        cpa = incremental_investment / business_impact_sales if business_impact_sales > 0 else 0
+        efficiency_label = "CPA Incremental"
+        efficiency_val = format_number(cpa, currency=True) if business_impact_sales > 0 else "N/A"
+
     # --- 4. Build HTML Components ---
-
-    # --- New: Channel Proportions Table ---
-    channel_proportions_html = ""
-    if channel_proportions:
-        channel_proportions_html = '<table class="scenarios-table"><tr><th>Canal</th><th>Proporção de Investimento Recomendada</th></tr>'
-        sorted_channels = sorted(channel_proportions.items(), key=lambda item: item[1], reverse=True)
-        for channel, proportion in sorted_channels:
-            channel_proportions_html += f"<tr><td>{channel}</td><td>{proportion:.2%}</td></tr>"
-        channel_proportions_html += "</table>"
-    # --- End New ---
-    
-    # --- DYNAMIC LOGIC for Table ---
-    scenarios_table_html = ""
-    if scenarios_df is not None and not scenarios_df.empty:
-        # Determine headers based on whether there is a monetary value
-        if avg_ticket > 0:
-            header = "<th>Cenário</th><th>Investimento Mensal</th><th>Receita Projetada</th><th>ROI Marginal</th><th>Investimento Incremental</th><th>Receita Incremental</th>"
-            row_template = (
-                "<td>{Scenario}</td>"
-                "<td>{inv_monthly}</td>"
-                "<td>{proj_rev}</td>"
-                "<td>{roi:.2f}</td>"
-                "<td>{inc_inv}</td>"
-                "<td>{inc_rev}</td>"
-            )
-        else:
-            header = "<th>Cenário</th><th>Investimento Mensal</th><th>Oportunidades Projetadas</th><th>Custo por Oportunidade Incremental</th><th>Investimento Incremental</th><th>Oportunidades Incrementais</th>"
-            row_template = (
-                "<td>{Scenario}</td>"
-                "<td>{inv_monthly}</td>"
-                "<td>{proj_orders:,.0f}</td>"
-                "<td>{cpa}</td>"
-                "<td>{inc_inv}</td>"
-                "<td>{inc_orders:,.0f}</td>"
-            )
-
-        scenarios_table_html = f'<table class="scenarios-table"><tr>{header}</tr>'
-        
-        # Create a monthly version for reporting
-        monthly_scenarios_df = scenarios_df.copy()
-        monthly_scenarios_df['Monthly_Investment'] = monthly_scenarios_df['Daily_Investment'] * 30
-        monthly_scenarios_df['Projected_Total_KPIs'] = monthly_scenarios_df['Projected_Total_KPIs'] * 30
-        monthly_scenarios_df['Incremental_Investment'] = monthly_scenarios_df['Incremental_Investment'] * 30
-        if 'Projected_Revenue' in monthly_scenarios_df.columns:
-            monthly_scenarios_df['Projected_Revenue'] = monthly_scenarios_df['Projected_Revenue'] * 30
-        if 'Incremental_Revenue' in monthly_scenarios_df.columns:
-            monthly_scenarios_df['Incremental_Revenue'] = monthly_scenarios_df['Incremental_Revenue'] * 30
-
-
-        # Filter for the three key scenarios for the table
-        scenarios_to_include = ['Cenário Atual', 'Máxima Eficiência', 'Limite Estratégico']
-        filtered_scenarios_df = monthly_scenarios_df[monthly_scenarios_df['Scenario'].isin(scenarios_to_include)]
-
-        # Build table directly from the filtered scenarios_df to ensure data integrity
-        for _, row in filtered_scenarios_df.sort_values('Monthly_Investment').iterrows():
-            inc_investment = row.get('Incremental_Investment', 0)
-            inc_revenue_or_orders = row.get('Incremental_Revenue', 0)
-            
-            if avg_ticket > 0:
-                formatted_row = row_template.format(
-                    Scenario=row['Scenario'],
-                    inv_monthly=format_number(row['Monthly_Investment'], currency=True),
-                    proj_rev=format_number(row.get('Projected_Revenue', 0), currency=True),
-                    roi=row.get('Incremental_ROI', 0),
-                    inc_inv=format_number(inc_investment, currency=True),
-                    inc_rev=format_number(inc_revenue_or_orders, currency=True)
-                )
-            else:
-                cpa = format_number(inc_investment / inc_revenue_or_orders, currency=True) if inc_revenue_or_orders > 0 else "N/A"
-                proj_orders = row['Projected_Total_KPIs'] * config.get('conversion_rate_from_kpi_to_bo', 0)
-                inc_orders = inc_revenue_or_orders * config.get('conversion_rate_from_kpi_to_bo', 0)
-                formatted_row = row_template.format(
-                    Scenario=row['Scenario'],
-                    inv_monthly=format_number(row['Monthly_Investment'], currency=True),
-                    proj_orders=proj_orders,
-                    cpa=cpa,
-                    inc_inv=format_number(inc_investment, currency=True),
-                    inc_orders=inc_orders
-                )
-            
-            scenarios_table_html += f"<tr>{formatted_row}</tr>"
-        scenarios_table_html += "</table>"
-    # --- END DYNAMIC LOGIC ---
 
     # Next Steps List
     next_steps_html = ""
@@ -249,9 +258,9 @@ def generate_html_report(gemini_client, results_data, config, image_paths, outpu
             if isinstance(item, dict):
                 next_steps_html += f"<li><strong>{item.get('step', '')}:</strong> {item.get('description', '')}</li>"
 
-    # --- DYNAMIC LOGIC for Highlight Box ---
-    highlight_title = "Destaque: O Ganho de Receita Incremental" if avg_ticket > 0 else "Destaque: O Ganho de Pedidos Incrementais"
-    # --- END DYNAMIC LOGIC ---
+    # Generate Markdown Report directly
+    markdown_filename = os.path.join(os.path.dirname(output_filename), "RECOMMENDATIONS.md")
+    generate_markdown_report_from_narrative(narrative, results_data, config, markdown_filename)
 
     # --- 5. Final HTML Assembly ---
     html_template = """
@@ -274,10 +283,7 @@ def generate_html_report(gemini_client, results_data, config, image_paths, outpu
             .chart-container {{ text-align: center; margin-top: 20px; }}
             .chart-container img {{ max-width: 100%; height: auto; border: 1px solid #e0e0e0; border-radius: 4px; }}
             .footer {{ text-align: center; padding: 20px; font-size: 12px; color: #5f6368; }}
-            .scenarios-table {{ width: 100%; border-collapse: collapse; margin-top: 20px; }}
-            .scenarios-table th, .scenarios-table td {{ border: 1px solid #e0e0e0; padding: 12px; text-align: left; }}
-            .scenarios-table th {{ background-color: #f2f2f2; font-weight: bold; }}
-            .highlight-section {{ background-color: #E8F0FE; border: 1px solid #D2E3FC; border-radius: 8px; margin-top: 20px; padding: 15px; }}
+            .highlight-section {{ background-color: #f1f3f4; border-left: 4px solid #1a73e8; padding: 20px; margin-top: 20px; border-radius: 4px; }}
             .metrics-list li {{ margin-bottom: 10px; }}
         </style>
     </head>
@@ -285,41 +291,38 @@ def generate_html_report(gemini_client, results_data, config, image_paths, outpu
         <div class="container">
             <div class="header"><h1>{report_title}</h1></div>
 
+            <div class="highlight-section">
+                <h2 style="color: #202124; margin-top: 0;">Veredito Executivo</h2>
+                <p style="font-size: 18px; font-weight: 500; margin-bottom: 0;">{executive_verdict}</p>
+            </div>
+
             <div class="section">
-                <h2>Parte 1: Valor Entregue - Provando o Impacto Passado</h2>
+                <h2>Análise Aprofundada e Eficiência</h2>
+                <p>{detailed_analysis}</p>
+                <div style="background-color: #fff; border: 1px solid #dadce0; border-radius: 8px; padding: 15px; margin-top: 15px;">
+                    <h3 style="margin-top: 0; margin-bottom: 10px;">Métricas de Eficiência Incremental</h3>
+                    <ul class="metrics-list" style="margin-bottom: 0;">
+                        <li><strong>Investimento Incremental:</strong> {incremental_investment_str}</li>
+                        <li><strong>Lift Mensurável ({business_impact_label_str}):</strong> {business_impact_str}</li>
+                        <li><strong>{efficiency_label}:</strong> {efficiency_val}</li>
+                    </ul>
+                </div>
+            </div>
+
+            <div class="section">
+                <h2>O Impacto Causal e Metodologia</h2>
                 <p>{value_delivered_narrative}</p>
                 <div class="chart-container"><img src="data:image/png;base64,{line_img}" alt="Gráfico de Análise de Impacto Causal"></div>
                 <div style="display: flex; justify-content: space-around; margin-top: 20px;">
                     <div class="chart-container" style="width: 48%;"><img src="data:image/png;base64,{investment_img}" alt="Gráfico de Investimento"></div>
                     <div class="chart-container" style="width: 48%;"><img src="data:image/png;base64,{sessions_img}" alt="Gráfico de Sessões"></div>
                 </div>
-                <h3>A Metodologia</h3>
+                <h3>A Metodologia Opcional</h3>
                 <p>{methodology_narrative}</p>
             </div>
 
             <div class="section">
-                <h2>Parte 2: Impacto Futuro Projetado - Previsão de Crescimento</h2>
-                <p>{projected_impact_narrative}</p>
-                {scenarios_table_html}
-            </div>
-
-            <div class="section">
-                <h2>Parte 3: A Oportunidade de Investimento - Nossa Recomendação</h2>
-                <div class="chart-container"><img src="data:image/png;base64,{opportunity_img}" alt="Gráfico de Projeção de Oportunidade"></div>
-                <h3>{investment_opportunity_title}</h3>
-                <p>{recommendation_narrative}</p>
-                <div class="section highlight-section">
-                    <h3>{highlight_title}</h3>
-                    <p>{highlight_narrative}</p>
-                </div>
-                <h3>Mix de Canais Recomendado (Cenário de Máxima Eficiência)</h3>
-                {channel_proportions_html}
-                <h3>{strategic_rationale_title}</h3>
-                <p>{strategic_rationale_narrative}</p>
-            </div>
-
-            <div class="section">
-                <h2>Próximos Passos: Rumo a uma Parceria Estratégica</h2>
+                <h2>Próximos Passos Estratégicos</h2>
                 <ul>{next_steps_html}</ul>
             </div>
 
@@ -343,31 +346,28 @@ def generate_html_report(gemini_client, results_data, config, image_paths, outpu
                     <li><strong>Limiar de Significância Estatística (p-value):</strong> {p_value_threshold}</li>
                 </ul>
             </div>
-            <div class="footer"><p>Gerado pelo Gerador Automatizado de Estudo de Caso de Oportunidade Total.</p></div>
+            <div class="footer"><p>Gerado pelo Módulo de Inteligência Artificial da Opportunity Engine.</p></div>
         </div>
     </body>
     </html>
     """.format(
         report_title=html.escape(narrative.get('report_title', 'Análise de Impacto Causal')),
-        value_delivered_narrative=narrative.get('part1_value_delivered', {}).get('narrative', ''),
-        methodology_narrative=narrative.get('part1_value_delivered', {}).get('methodology_narrative', ''),
-        projected_impact_narrative=narrative.get('part2_projected_impact', {}).get('narrative', ''),
-        investment_opportunity_title=narrative.get('part3_investment_opportunity', {}).get('title', 'Recomendação de Investimento'),
-        recommendation_narrative=narrative.get('part3_investment_opportunity', {}).get('recommendation_narrative', ''),
-        highlight_title=highlight_title,
-        highlight_narrative=narrative.get('part3_investment_opportunity', {}).get('highlight_narrative', ''),
-        strategic_rationale_title=narrative.get('part3_investment_opportunity', {}).get('strategic_rationale_title', 'Racional Estratégico'),
-        strategic_rationale_narrative=narrative.get('part3_investment_opportunity', {}).get('strategic_rationale_narrative', ''),
+        executive_verdict=narrative.get('executive_verdict', ''),
+        detailed_analysis=narrative.get('detailed_analysis', ''),
+        value_delivered_narrative=narrative.get('value_delivered', {}).get('narrative', ''),
+        methodology_narrative=narrative.get('value_delivered', {}).get('methodology_narrative', ''),
         next_steps_html=next_steps_html,
-        scenarios_table_html=scenarios_table_html,
-        channel_proportions_html=channel_proportions_html,
+        incremental_investment_str=incremental_investment_str,
+        business_impact_label_str=business_impact_label_str,
+        business_impact_str=business_impact_str,
+        efficiency_label=efficiency_label,
+        efficiency_val=efficiency_val,
         line_img=image_b64s.get('line', ''),
         investment_img=image_b64s.get('investment', ''),
         sessions_img=image_b64s.get('sessions', ''),
-        opportunity_img=image_b64s.get('opportunity', ''),
         accuracy_img=image_b64s.get('accuracy', ''),
         r_squared=results_data.get('model_r_squared', 0),
-        r_squared_pct=results_data.get('model_r_squared', 0) * 100,
+        r_squared_pct=results_data.get('model_r_squared', 0),
         p_value=results_data.get('p_value', 0),
         mape=results_data.get('mape', 0),
         avg_ticket_formatted=format_number(avg_ticket, currency=True),
@@ -426,6 +426,10 @@ def generate_global_gemini_report(gemini_client, config, scenarios=None, total_i
           {{
             "scenario_name": "Estratégico (Modelo de Elasticidade)",
             "analysis": "An analysis of the 'Estratégico (Modelo de Elasticidade)' scenario, explaining the rationale for the budget allocation based on the model's long-term contribution findings."
+          }},
+          {{
+            "scenario_name": "Realocação Estratégica (Mesmo Orçamento)",
+            "analysis": "An analysis of the 'Realocação Estratégica' scenario, highlighting the efficiency gains and incremental value achieved purely by reallocating the current budget according to the elasticity model, without any actual increase in spend."
           }}
         ]
       }},
@@ -468,6 +472,12 @@ def generate_global_gemini_report(gemini_client, config, scenarios=None, total_i
         cleaned_response_text = response.text.strip().replace('```json\n', '').replace('\n```', '')
         narrative = json.loads(cleaned_response_text)
         print("   - ✅ Global narrative generated and parsed successfully.")
+        
+        # NEW: Save the JSON payload so the Streamlit UI can render the insights without re-running Gemini
+        json_output_path = os.path.join(global_output_dir, 'global_narrative.json')
+        with open(json_output_path, 'w', encoding='utf-8') as f:
+            json.dump(narrative, f, ensure_ascii=False, indent=4)
+            
     except Exception as e:
         print(f"   - ❌ ERROR: Could not generate or parse the global narrative from Gemini. Details: {e}")
         return
@@ -490,6 +500,9 @@ def generate_global_gemini_report(gemini_client, config, scenarios=None, total_i
             title = scen['title']
             
             channel_mix_html += f"<h3>{title}</h3>"
+            if 'description' in scen:
+                channel_mix_html += f"<p>{scen['description']}</p>"
+                
             header = "<th>Canal</th><th>Média Histórica</th><th>Pico de Eficiência</th><th>Modelo de Elasticidade</th>"
             
             rows = ""
@@ -512,10 +525,45 @@ def generate_global_gemini_report(gemini_client, config, scenarios=None, total_i
                 total_row += f"<td><strong>{format_number(sum(split.values()), currency=True)} (100.00%)</strong></td>"
             total_row += "</tr>"
             
+            # --- NEW: Append KPIs and CPA rows to HTML table ---
+            projected_kpis = scen.get('projected_kpis', {})
+            total_inv = scen.get('total_investment', 0)
+            kpi_cpa_rows = ""
+            
+            if projected_kpis:
+                avg_ticket = config.get('average_ticket', config.get('average_ticket_value', 0))
+                conv_rate = config.get('conversion_rate_from_kpi_to_bo', 0)
+                
+                if avg_ticket > 0:
+                    kpi_row = "<tr><td><strong>Projeção de Receita</strong></td>"
+                    cpa_row = "<tr><td><strong>ROAS</strong></td>"
+                else:
+                    kpi_label = config.get('primary_business_metric_name', 'KPIs')
+                    kpi_row = f"<tr><td><strong>Projeção de {kpi_label}</strong></td>"
+                    cpa_row = "<tr><td><strong>CPA</strong></td>"
+                
+                for split_name in ['Média Histórica', 'Pico de Eficiência', 'Modelo de Elasticidade']:
+                    raw_kpi = projected_kpis.get(split_name, 0)
+                    actual_kpi = raw_kpi * conv_rate if conv_rate > 0 else raw_kpi
+                    
+                    if avg_ticket > 0:
+                        revenue = actual_kpi * avg_ticket
+                        roas = revenue / total_inv if total_inv > 0 else 0
+                        kpi_row += f"<td><strong>{format_number(revenue, currency=True)}</strong></td>"
+                        cpa_row += f"<td><strong>{roas:.2f}</strong></td>"
+                    else:
+                        cpa_val = total_inv / actual_kpi if actual_kpi > 0 else 0
+                        kpi_row += f"<td><strong>{format_number(actual_kpi)}</strong></td>"
+                        cpa_row += f"<td><strong>{format_number(cpa_val, currency=True)}</strong></td>"
+                
+                kpi_row += "</tr>"
+                cpa_row += "</tr>"
+                kpi_cpa_rows = kpi_row + cpa_row
+            
             channel_mix_html += f"""
             <table class="scenarios-table">
                 <thead><tr>{header}</tr></thead>
-                <tbody>{rows}{total_row}</tbody>
+                <tbody>{rows}{total_row}{kpi_cpa_rows}</tbody>
             </table>
             """
     # --- End New ---
@@ -544,36 +592,74 @@ def generate_global_gemini_report(gemini_client, config, scenarios=None, total_i
     # --- New: Build Summary Table ---
     summary_table_html = ""
     if kpi_projections:
-        kpi_label = config.get('primary_business_metric_name', 'KPIs')
+        avg_ticket = config.get('average_ticket', config.get('average_ticket_value', 0))
+        conv_rate = config.get('conversion_rate_from_kpi_to_bo', 0)
         
         summary_table_html += '<div class="section">'
         summary_table_html += '<h2>Resumo dos Cenários Projetados</h2>'
-        summary_table_html += '<p>A tabela abaixo resume o impacto projetado de cada cenário de investimento, comparando o retorno esperado e a eficiência de custo em relação ao modelo histórico.</p>'
+        summary_table_html += '<p>A tabela abaixo apresenta os resultados projetados de quatro cenários de investimento chave, assumindo que seus respectivos mix recomendados sejam aplicados:</p>'
+        summary_table_html += '<ul>'
+        summary_table_html += '<li><strong>Cenário Atual (Média Histórica):</strong> Mantém o nível de investimento e o mix idênticos às médias observadas.</li>'
+        summary_table_html += '<li><strong>Cenário Otimizado (Pico de Eficiência):</strong> Escala o investimento total para o ponto de maior eficiência detectado e usa o mix dos melhores períodos.</li>'
+        summary_table_html += '<li><strong>Cenário Estratégico (Modelo de Elasticidade):</strong> Expande o orçamento até o limite ótimo de saturação calculado pelo modelo iterativo.</li>'
+        summary_table_html += '<li><strong>Realocação Estratégica (Mesmo Orçamento):</strong> Mantém o investimento atual, mas redistribui a verba segundo o Modelo de Elasticidade para ganho puro de eficiência.</li>'
+        summary_table_html += '</ul>'
         summary_table_html += '<table class="scenarios-table">'
-        summary_table_html += f'<thead><tr><th>Cenário</th><th>Investimento Mensal</th><th>Projeção de {kpi_label}</th><th>Custo por {kpi_label} (CPA)</th><th>{kpi_label} Incrementais</th></tr></thead><tbody>'
+        
+        if avg_ticket > 0:
+            header = '<thead><tr><th>Cenário</th><th>Investimento Mensal</th><th>Receita Projetada</th><th>Investimento Incremental</th><th>Receita Incremental</th><th>ROI Incremental</th></tr></thead><tbody>'
+        else:
+            kpi_label = config.get('primary_business_metric_name', 'KPIs')
+            header = f'<thead><tr><th>Cenário</th><th>Investimento Mensal</th><th>Projeção de {kpi_label}</th><th>Investimento Incremental</th><th>{kpi_label} Incrementais</th><th>Custo por {kpi_label} Incremental</th></tr></thead><tbody>'
+        
+        summary_table_html += header
         
         scenario_map = [
             ('Cenário Atual (Média Histórica)', 'current'),
             ('Cenário Otimizado (Pico de Eficiência)', 'optimized'),
-            ('Cenário Estratégico (Modelo de Elasticidade)', 'strategic')
+            ('Cenário Estratégico (Modelo de Elasticidade)', 'strategic'),
+            ('Realocação Estratégica (Mesmo Orçamento)', 'reallocation')
         ]
+        
+        current_point = kpi_projections.get('current')
+        current_inv = current_point.get('Daily_Investment', 0) * 30 if current_point else 0
         
         for title, key in scenario_map:
             point = kpi_projections.get(key)
             if point:
                 inv = point.get('Daily_Investment', 0) * 30
+                inc_inv = inv - current_inv if key != 'current' else 0
+                
                 kpi = point.get('Projected_Total_KPIs', 0) * 30
-                inc_kpi = point.get('Incremental_KPI', 0) * 30
-                cpa = inv / kpi if kpi > 0 else 0
+                inc_kpi = point.get('Incremental_KPI', 0) * 30 if key != 'current' else 0
+                
+                orders = kpi * conv_rate if conv_rate > 0 else kpi
+                inc_orders = inc_kpi * conv_rate if conv_rate > 0 else inc_kpi
                 
                 inv_str = format_number(inv, currency=True)
-                kpi_str = format_number(kpi)
-                cpa_str = format_number(cpa, currency=True)
-                inc_kpi_str = format_number(inc_kpi)
+                inc_inv_str = format_number(inc_inv, currency=True) if key != 'current' else '-'
                 
-                # Highlight the Strategic row
                 row_style = ' style="background-color: #e8f0fe;"' if key == 'strategic' else ''
-                summary_table_html += f"<tr{row_style}><td><strong>{title}</strong></td><td>{inv_str}</td><td>{kpi_str}</td><td>{cpa_str}</td><td>{inc_kpi_str}</td></tr>"
+                
+                if avg_ticket > 0:
+                    revenue = orders * avg_ticket
+                    inc_revenue = inc_orders * avg_ticket
+                    roi = (inc_revenue - inc_inv) / inc_inv if inc_inv > 0 else 0
+                    
+                    rev_str = format_number(revenue, currency=True)
+                    inc_rev_str = format_number(inc_revenue, currency=True) if key != 'current' else '-'
+                    roi_str = f"{roi:.2f}" if key != 'current' and inc_inv > 0 else '-'
+                    
+                    summary_table_html += f"<tr{row_style}><td><strong>{title}</strong></td><td>{inv_str}</td><td>{rev_str}</td><td>{inc_inv_str}</td><td>{inc_rev_str}</td><td>{roi_str}</td></tr>"
+                else:
+                    kpi_str = format_number(orders)
+                    inc_kpi_str = format_number(inc_orders) if key != 'current' else '-'
+                    
+                    cpa_qty = inc_orders
+                    cpa = inc_inv / cpa_qty if cpa_qty > 0 else 0
+                    cpa_str = format_number(cpa, currency=True) if key != 'current' and cpa_qty > 0 else '-'
+                    
+                    summary_table_html += f"<tr{row_style}><td><strong>{title}</strong></td><td>{inv_str}</td><td>{kpi_str}</td><td>{inc_inv_str}</td><td>{inc_kpi_str}</td><td>{cpa_str}</td></tr>"
         
         summary_table_html += '</tbody></table></div>'
     # --- End New ---

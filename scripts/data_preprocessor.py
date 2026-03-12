@@ -30,6 +30,38 @@ def find_best_alpha(investment_series, kpi_series):
     best_alpha = max(correlations, key=correlations.get)
     return best_alpha, correlations[best_alpha]
 
+def robust_date_parsing(series, date_format=None):
+    """
+    Attempt to parse dates using the provided format. If it fails or results in many NaTs,
+    fall back to pandas automatic date inference.
+    """
+    original_non_nulls = series.notna().sum()
+    if original_non_nulls == 0:
+        return pd.to_datetime(series, errors='coerce')
+        
+    if date_format:
+        parsed = pd.to_datetime(series, format=date_format, errors='coerce')
+        if parsed.notna().sum() == original_non_nulls:
+            return parsed
+        print(f"   - WARNING: Configured date format '{date_format}' failed for some rows. Falling back to auto-detection.")
+        
+    # Fallback to general parsing if specific format fails
+    try:
+        # Attempt to let pandas infer the format
+        parsed = pd.to_datetime(series, errors='coerce')
+        
+        # If still failing, try with format='mixed' (Pandas 2.0+)
+        if parsed.notna().sum() < original_non_nulls:
+             try:
+                 parsed = pd.to_datetime(series, format='mixed', errors='coerce')
+             except:
+                 pass
+        return parsed
+    except Exception as e:
+        print(f"   - ERROR: Date parsing failed completely: {e}")
+        return pd.to_datetime(series, errors='coerce')
+
+
 def load_and_prepare_data(config):
     """
     Loads and prepares the KPI, investment, and trends data based on the config.
@@ -55,7 +87,7 @@ def load_and_prepare_data(config):
                     trends_map.get('date_col', 'Start Date'): 'Date',
                     trends_map.get('trends_col', 'Ad Opportunities'): 'Generic Searches'
                 }, inplace=True)
-                trends_df['Date'] = pd.to_datetime(trends_df['Date'], format=date_formats.get('generic_trends_file'), errors='coerce')
+                trends_df['Date'] = robust_date_parsing(trends_df['Date'], date_format=date_formats.get('generic_trends_file'))
                 trends_df.dropna(subset=['Date'], inplace=True)
                 trends_df = trends_df[['Date', 'Generic Searches']].sort_values(by='Date').reset_index(drop=True)
             except FileNotFoundError:
@@ -95,8 +127,8 @@ def load_and_prepare_data(config):
         daily_investment_df['Product Group'] = daily_investment_df['Product Group'].str.strip()
 
         # --- Date Formatting ---
-        kpi_df['Date'] = pd.to_datetime(kpi_df['Date'], format=date_formats.get('performance_file'), errors='coerce')
-        daily_investment_df['Date'] = pd.to_datetime(daily_investment_df['Date'], format=date_formats.get('investment_file'), errors='coerce')
+        kpi_df['Date'] = robust_date_parsing(kpi_df['Date'], date_format=date_formats.get('performance_file'))
+        daily_investment_df['Date'] = robust_date_parsing(daily_investment_df['Date'], date_format=date_formats.get('investment_file'))
 
         # --- Data Cleaning & Validation ---
         kpi_df.dropna(subset=['Date', 'kpi'], inplace=True)

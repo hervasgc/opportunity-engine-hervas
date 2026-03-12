@@ -146,7 +146,7 @@ def save_sessions_bar_plot(sessions_bar_df, output_path, kpi_name='kpi'):
 
 def save_opportunity_curve_plot(response_curve_df, baseline_point, max_efficiency_point,
                                 diminishing_return_point, saturation_point, filename,
-                                kpi_name='kpi', strategic_limit_point=None, config=None):
+                                kpi_name='kpi', strategic_limit_point=None, strategic_reallocation_point=None, config=None):
     """
     Saves the saturation curve plot with smart labeling using ax.annotate.
     """
@@ -178,12 +178,18 @@ def save_opportunity_curve_plot(response_curve_df, baseline_point, max_efficienc
     plt.style.use('seaborn-v0_8-whitegrid')
     fig, ax = plt.subplots(figsize=(18, 10))
 
-    # Plot the main curve using TOTAL KPI
+    # Plot the curves
+    if 'Projected_Total_KPIs_Historical' in plot_df.columns:
+        ax.plot(plot_df['Monthly_Investment'], plot_df['Projected_Total_KPIs_Historical'] * 30,
+                label='Curva - Mix Histórico', color='gray', linewidth=2, linestyle=':')
+    if 'Projected_Total_KPIs_Optimized' in plot_df.columns:
+        ax.plot(plot_df['Monthly_Investment'], plot_df['Projected_Total_KPIs_Optimized'] * 30,
+                label='Curva - Mix Otimizado', color='salmon', linewidth=2, linestyle='--')
     ax.plot(plot_df['Monthly_Investment'], plot_df['Monthly_KPIs'],
-            label='Curva de Resposta Preditiva', color='royalblue', linewidth=2)
+            label='Curva - Elasticidade Estratégica', color='royalblue', linewidth=3)
 
-    # --- INTERNAL HELPER FOR PLOTTING POINTS ---
-    def plot_point(point, color, label, marker='o', size=100, xytext=(0, 10)):
+    # --- INTERNAL HELPER FOR PLOTTING SCENARIO LINES ---
+    def plot_scenario(point, color, label, xytext=(0, 10)):
         if not point: return
 
         d_inv = point.get('Daily_Investment', 0)
@@ -193,7 +199,11 @@ def save_opportunity_curve_plot(response_curve_df, baseline_point, max_efficienc
 
         if monthly_inv == 0 and monthly_kpi == 0 and label != 'Cenário Atual': return
 
-        ax.scatter(monthly_inv, monthly_kpi, color=color, s=size, label=label, marker=marker, zorder=5, edgecolors='white', linewidth=1.5)
+        # Draw a vertical line spanning the y-axis for this investment level
+        ax.axvline(x=monthly_inv, color=color, linestyle='--', linewidth=1.5, alpha=0.5, zorder=3)
+
+        # Plot a very small dot at the exact intersection
+        ax.scatter(monthly_inv, monthly_kpi, color=color, s=40, zorder=5)
 
         # Format Label Text (showing Total KPI as a full integer)
         kpi_str = f'{monthly_kpi:,.0f}' # Using .0f for full integer with commas
@@ -205,29 +215,33 @@ def save_opportunity_curve_plot(response_curve_df, baseline_point, max_efficienc
                     textcoords='offset points',
                     ha='center', va='top', # va='top' for below-point placement
                     fontsize=11,
-                    bbox=dict(boxstyle="round,pad=0.3", fc="white", ec=color, alpha=0.8),
+                    bbox=dict(boxstyle="round,pad=0.3", fc="white", ec=color, alpha=0.9),
                     arrowprops=dict(arrowstyle="->", connectionstyle="arc3,rad=0.1", color=color))
 
-    # 4. Plotting Strategic Points
-    # Use different offsets to prevent overlap if points coincide
-    plot_point(baseline_point, 'gray', 'Cenário Atual',
-               marker='o', size=150, xytext=(0, -60))
+    # 4. Plotting Strategic Scenarios
+    # Use different offsets to prevent overlap if lines coincide
+    plot_scenario(baseline_point, 'gray', 'Cenário Atual',
+                  xytext=(0, -60))
 
     # If Max Efficiency is the same as Baseline, offset its label upwards
     max_eff_offset = (0, 60) if max_efficiency_point and baseline_point and \
                       abs(max_efficiency_point.get('Daily_Investment', 0) - baseline_point.get('Daily_Investment', 0)) < 1e-3 \
                       else (0, -60)
     
-    plot_point(max_efficiency_point, 'red', 'Máxima Eficiência',
-               marker='*', size=250, xytext=max_eff_offset)
+    plot_scenario(max_efficiency_point, 'salmon', 'Máxima Eficiência',
+                  xytext=max_eff_offset)
 
     if strategic_limit_point:
-        plot_point(strategic_limit_point, 'green', 'Limite Estratégico',
-                   marker='X', size=150, xytext=(0, -60))
+        plot_scenario(strategic_limit_point, 'royalblue', 'Limite Estratégico',
+                   xytext=(0, -60))
 
     if diminishing_return_point:
-         plot_point(diminishing_return_point, 'orange', 'Retorno Decrescente',
-                    marker='D', size=100, xytext=(0, -50))
+         plot_scenario(diminishing_return_point, 'orange', 'Retorno Decrescente',
+                    xytext=(0, -50))
+
+    if strategic_reallocation_point:
+        plot_scenario(strategic_reallocation_point, 'royalblue', 'Realocação (Mesmo Orçamento)',
+                   xytext=(0, 60))
 
     # 5. Final Cosmetics
     ax.set_title('Curva de Resposta: Cenários Estratégicos de Investimento (Mensal)', fontsize=20, pad=20)
@@ -263,13 +277,19 @@ def create_comparative_saturation_md(scenarios, output_filename, kpi_projections
     # --- New: Summary Table ---
     if kpi_projections:
         markdown_content += "## Resumo dos Cenários Projetados\n\n"
+        markdown_content += "A tabela abaixo apresenta os resultados projetados de quatro cenários de investimento chave, assumindo que seus respectivos mix recomendados sejam aplicados:\n\n"
+        markdown_content += "- **Cenário Atual (Média Histórica):** Mantém o nível de investimento e o mix idênticos às médias observadas.\n"
+        markdown_content += "- **Cenário Otimizado (Pico de Eficiência):** Escala o investimento total para o ponto de maior eficiência detectado e usa o mix dos melhores períodos.\n"
+        markdown_content += "- **Cenário Estratégico (Modelo de Elasticidade):** Expande o orçamento até o limite ótimo de saturação calculado pelo modelo iterativo.\n"
+        markdown_content += "- **Realocação Estratégica (Mesmo Orçamento):** Mantém o investimento atual, mas redistribui a verba segundo o Modelo de Elasticidade para ganho puro de eficiência.\n\n"
         markdown_content += f"| Cenário | Investimento Mensal | Projeção de {kpi_name} | Custo por {kpi_name} (CPA) | Investimento Incremental | {kpi_name} Incrementais | iCPA |\n"
         markdown_content += "|:---|:---|:---|:---|:---|:---|:---|\n"
         
         scenario_map = [
             ('Cenário Atual (Média Histórica)', 'current'),
             ('Cenário Otimizado (Pico de Eficiência)', 'optimized'),
-            ('Cenário Estratégico (Modelo de Elasticidade)', 'strategic')
+            ('Cenário Estratégico (Modelo de Elasticidade)', 'strategic'),
+            ('Realocação Estratégica (Mesmo Orçamento)', 'reallocation')
         ]
         
         baseline_point = kpi_projections.get('current', {})
@@ -308,6 +328,8 @@ def create_comparative_saturation_md(scenarios, output_filename, kpi_projections
     
     for scen in scenarios:
         markdown_content += f"### {scen['title']}\n\n"
+        if 'description' in scen:
+            markdown_content += f"{scen['description']}\n\n"
         
         header = "| Canal | Média Histórica | Pico de Eficiência | Modelo de Elasticidade |\n"
         separator = "|:---|:---|:---|:---|\n"
@@ -331,25 +353,42 @@ def create_comparative_saturation_md(scenarios, output_filename, kpi_projections
             total_row += f" **{format_number(sum(split.values()), currency=True)} (100.00%)** |"
         body += total_row + "\n"
         
+        # --- NEW: Append KPIs and CPA rows ---
+        projected_kpis = scen.get('projected_kpis', {})
+        total_inv = scen.get('total_investment', 0)
+        
+        if projected_kpis:
+            kpi_row = f"| **Projeção de {kpi_name}** |"
+            cpa_row = f"| **CPA** |"
+            
+            for split_name in ['Média Histórica', 'Pico de Eficiência', 'Modelo de Elasticidade']:
+                kpi_val = projected_kpis.get(split_name, 0)
+                cpa_val = total_inv / kpi_val if kpi_val > 0 else 0
+                
+                kpi_row += f" **{format_number(kpi_val)}** |"
+                cpa_row += f" **{format_number(cpa_val, currency=True)}** |"
+                
+            body += kpi_row + "\n" + cpa_row + "\n"
+        
         markdown_content += header + separator + body + "\n"
 
     methodology = """
 ---
-## Como a Distribuição de Investimento é Calculada
+## Metodologia de Distribuição de Investimento (Mix de Canais)
 
-Esta análise apresenta três abordagens data-driven para a alocação de orçamento. Cada uma oferece uma perspectiva estratégica diferente.
+Para cada nível de orçamento projetado nas tabelas anteriores, a análise apresenta três abordagens diferentes de distribuição da verba entre os canais (as colunas das tabelas). Cada uma serve a um propósito estratégico:
 
-### 1. Cenário Atual (Média Histórica)
-- **Metodologia:** Esta abordagem utiliza a média histórica de investimento como baseline.
-- **Ponto Forte:** Serve como um ponto de referência para avaliar o desempenho das outras estratégias.
+### 1. Mix: Média Histórica
+- **Metodologia:** Esta abordagem distribui a verba reproduzindo a proporção exata observada no passado.
+- **Ponto Forte:** Serve primariamente como a linha de base para avaliarmos o ganho da modelagem sem mudanças bruscas.
 
-### 2. Cenário Otimizado (Pico de Eficiência)
-- **Metodologia:** Esta abordagem analisa o histórico de performance para identificar as 10 semanas de maior eficiência sustentada (KPIs vs. Investimento). A alocação de orçamento recomendada é a média do mix de canais utilizado durante esses períodos de pico.
-- **Ponto Forte:** Revela combinações de canais que comprovadamente geraram resultados de alto impacto em curtos períodos. É ideal para planejar campanhas intensivas e de alto crescimento.
+### 2. Mix: Pico de Eficiência
+- **Metodologia:** Identifica isoladamente os 10% das semanas com o melhor índice de eficiência geral e aplica o mix exato que estava rodando lá.
+- **Ponto Forte:** É uma visão baseada em sucessos observados de curto prazo. Ideal para alavancar crescimento em cima de setups que "já sabemos que performaram bem".
 
-### 3. Cenário Estratégico (Modelo de Elasticidade)
-- **Metodologia:** Utiliza um modelo de elasticidade holístico que analisa todo o histórico de dados para decompor o KPI total nas contribuições individuais de cada canal, considerando efeitos de saturação e adstock. A alocação é proporcional à contribuição histórica modelada de cada canal.
-- **Ponto Forte:** Oferece uma visão estratégica do impacto "always-on" e de longo prazo de cada canal na base do negócio. É ideal para construir um plano de orçamento anual equilibrado e sustentável.
+### 3. Mix: Modelo de Elasticidade
+- **Metodologia:** Utiliza as equações causais do motor (Curvas de Saturação e Adstock) calculadas em cima de todo o histórico para decompor o impacto de cada canal na base. A verba é iterativamente alocada para igualar a eficiência marginal entre canais de forma matemática.
+- **Ponto Forte:** A principal e mais robusta visão estratégica de "always-on". Otimiza retornos de longo prazo prevendo o ponto em que cada canal esgota sua força, gerando a maior receita ou volume de aquisições toleráveis no budget estipulado.
 """
 
     with open(output_filename, 'w', encoding='utf-8') as f:

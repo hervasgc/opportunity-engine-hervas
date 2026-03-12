@@ -62,7 +62,7 @@ If your performance CSV has a column named `Conversions` that you want to analyz
 
 In the `generic_trends_file` section, you can specify the names for the date and trends columns. This file is used to provide the model with context about general market trends (e.g., search volume, competitor activity) that might influence your business outcomes.
 
-**This input is optional.** If you do not provide a path in the `generic_trends_file_path` setting in your `config.json`, the analysis will run without this data.
+**This input is optional.** If you do not provide a path in the `generic_trends_file_path` setting in your `config.json` (or leave it blank in the UI), the analysis will automatically synthesize generic control variables based on historical volume to ensure the causal model does not degrade.
 
 *   `date_col`: The name of the column containing the date.
 *   `trends_col`: The name of the column that provides general market data.
@@ -85,13 +85,11 @@ The analysis can be tailored to optimize for two different primary business goal
 -   `"optimization_target": "REVENUE"` (Default)
     -   The analysis will focus on metrics like Revenue and iROI (Incremental Return on Investment).
     -   This mode requires `"average_ticket"` to be set to a value greater than 0.
-    -   The "Strategic Limit" scenario will be calculated based on your `minimum_acceptable_iroi`.
 
 -   `"optimization_target": "CONVERSIONS"`
     -   Use this when you don't have a reliable average ticket or your goal is purely to maximize the number of conversions.
     -   The analysis will focus on metrics like CPA (Cost Per Acquisition) and iCPA (Incremental Cost Per Acquisition).
     -   The `"average_ticket"` parameter will be ignored.
-    -   The "Strategic Limit" scenario will not be calculated.
 
 **Example:**
 ```json
@@ -107,17 +105,16 @@ The analysis can be tailored to optimize for two different primary business goal
 }
 ```
 
-## 3. Controlling the Aggressiveness of Recommendations
+## 3. Controlling the Bound of Analysis
 
-By default, the analysis will explore investment scenarios up to 200% of your highest historical daily spend to find the mathematical optimum. While insightful, this can lead to recommendations for very large budget increases.
+By default, the analysis will explore investment saturation up to 200% of your highest historical daily spend to find the mathematical curve shape.
 
-To generate more conservative and realistic scenarios, you can add the optional `investment_limit_factor` to your `config.json`.
+To cap this exploration dynamically, you can add the optional `investment_limit_factor` to your `config.json`.
 
--   `investment_limit_factor`: A number that multiplies your maximum historical daily investment to set an upper bound for the analysis.
+-   `investment_limit_factor`: A number that multiplies your maximum historical daily investment to set an upper bound for the curves.
 
 **How it Works:**
--   If your highest daily spend was $10,000 and you set `"investment_limit_factor": 1.5`, the analysis will only explore budgets up to $15,000 per day.
--   This forces the "Máxima Eficiência" and "Limite Estratégico" points to be found within a more plausible budget range.
+-   If your highest daily spend was $10,000 and you set `"investment_limit_factor": 1.5`, the saturation engines will only compute the response curves up to $15,000 per day.
 -   If you omit this parameter, it will default to `2.0` (200%).
 
 **Example:**
@@ -125,29 +122,26 @@ To generate more conservative and realistic scenarios, you can add the optional 
 {
   "advertiser_name": "Advertiser A",
   "average_ticket": 1000,
-  "financial_targets": {
-    "target_iroas": 1.5
-  },
   "investment_limit_factor": 1.5,
   "p_value_threshold": 0.1,
   ...
 }
 ```
 
-## 4. Defining Your Strategic Investment Limit
+## 4. Defining Your Financial Constraints (Guardrails)
 
-A key feature of this analysis is the ability to define a **Strategic Limit** for your investment recommendations. Instead of just multiplying your budget arbitrarily, the engine can be strictly constrained by your actual business economics.
+A key feature of this engine is the ability to prune the saturation curves dynamically based on your actual business economics.
 
-This is controlled by the `financial_targets` block in your `config.json`. You can mix and match any of these four filters. The engine will calculate the "Strategic Limit" by finding the highest possible investment point that satisfies **all** the active filters simultaneously.
+This is controlled by the `financial_targets` block in your `config.json`. You can mix and match any of these four filters. The engine will halt generating profitable opportunity points globally on any channel as soon as they violate any of your defined guardrails.
 
 *   **`target_cpa`**: Sets a hard limit on the *average* Cost Per Acquisition across the entire investment.
-*   **`target_icpa`**: Sets a hard limit on the *incremental* Cost Per Acquisition. It stops the engine from recommending a budget increase if the cost to acquire the *next* single user is too high, even if the overall average CPA is still acceptable.
+*   **`target_icpa`**: Sets a hard limit on the *incremental* Cost Per Acquisition. It stops the engine from considering points if the cost to acquire the *next* single user is too high, even if the overall CPA is fine.
 *   **`target_roas`**: Sets a limit based on the total Return on Ad Spend (requires `average_ticket`).
-*   **`target_iroas`**: Sets a limit based on the *incremental* ROAS. It stops the engine when an additional R$ 1.00 invested no longer returns enough revenue to justify the spend.
+*   **`target_iroas`**: Sets a limit based on the *incremental* ROAS. It stops highlighting opportunities when an additional R$ 1.00 invested no longer returns enough revenue to justify the spend.
 
 **How it Works:**
-- If you set `"target_icpa": 30.0`, the "Strategic Limit" on the saturation curve will stop exactly at the point where acquiring one more conversion costs R$ 30.00. 
-- If you leave this block empty or omit a target, the engine assumes "infinity" (or zero for ROAS) and will fallback to capping the curve based on the `investment_limit_factor` (e.g., 1.5x your current spend).
+- If you set `"target_icpa": 30.0`, the point plotting on the saturation curve will structurally stop or flag exactly at the point where acquiring one more conversion dynamically exceeds R$ 30.00. 
+- If you leave this block empty or set the values to `0` or `999999`, the engine assumes "infinite profitability" and will rely solely on the underlying curve's shape to guide validation.
 
 **Example:**
 ```json
@@ -174,7 +168,7 @@ You can control this behavior using the `treat_outliers` parameter in your `conf
 
 *   **`"treat_outliers": true`**: (Boolean) Automatically detects and caps outliers in your primary KPI column (the one defined in `performance_kpi_column`) using the Interquartile Range (IQR) method (1.5 * IQR).
 *   **`"treat_outliers": ["Sessions", "Conversions"]`**: (List of Strings) Allows you to specify exactly which columns in your performance data should be treated.
-*   **`"treat_outliers": false`** (Default): No outlier treatment is applied. Use this if your data spikes are genuine (e.g., successful campaigns) and you want the model to fully account for them.
+*   **`"treat_outliers": false`** (Default): No outlier treatment is applied. Use this if your data spikes are genuine (e.g., successful campaigns) and you want the Causal Impact model to fully account for them natively.
 
 **Example:**
 ```json

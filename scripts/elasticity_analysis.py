@@ -337,10 +337,10 @@ def run_mmm_engine(config):
     }
 
 
-def generate_aggregated_response_curve(elasticity_results, config):
+def generate_aggregated_response_curve(elasticity_results, config, optimized_mix=None, output_dir=None):
     """
     Generates an aggregated response curve (Total Investment vs. Total KPI)
-    based on the Two-Stage Elasticity model.
+    based on the Two-Stage Elasticity model, scaling budget using the optimized mixes.
     """
     df = elasticity_results['dataframe']
     active_spend_cols = elasticity_results['spend_cols']
@@ -352,6 +352,11 @@ def generate_aggregated_response_curve(elasticity_results, config):
     avg_daily_spend = {col: df[col].mean() for col in active_spend_cols}
     total_avg_daily_spend = sum(avg_daily_spend.values())
     
+    historical_mix = {col: avg_daily_spend[col] / total_avg_daily_spend if total_avg_daily_spend > 0 else 0 for col in active_spend_cols}
+    strategic_mix = {k: v / 100.0 for k, v in elasticity_results['contribution_pct'].items()}
+    if not optimized_mix:
+        optimized_mix = historical_mix
+    
     limit_factor = config.get('investment_limit_factor', 3.0)
     multipliers = np.linspace(0, limit_factor, 100)
     
@@ -362,46 +367,50 @@ def generate_aggregated_response_curve(elasticity_results, config):
         adstocked = geometric_adstock(dummy_spend, opt_params['alphas'][i])
         adstock_multipliers[col] = adstocked[-1]
 
-    # Calculate baseline (m=1.0) marketing prediction for relative incrementality
-    base_mkt_features = []
-    for i, col in enumerate(active_spend_cols):
-        base_spend = avg_daily_spend[col] * 1.0
-        base_adstocked = base_spend * adstock_multipliers[col]
-        base_mkt_features.append(hill_transform(base_adstocked, opt_params['ks'][i], opt_params['ss'][i]))
-    
-    base_mkt_pred_daily = mkt_model.predict(mkt_scaler.transform([base_mkt_features]))[0]
-
-    simulation_results = []
-    
-    for m in multipliers:
-        current_total_daily_spend = total_avg_daily_spend * m
+    def simulate_kpi(total_spend, mix):
         mkt_features = []
-        
         for i, col in enumerate(active_spend_cols):
-            simulated_daily_spend = avg_daily_spend[col] * m
+            simulated_daily_spend = total_spend * mix.get(col, 0)
             simulated_adstocked = simulated_daily_spend * adstock_multipliers[col]
             mkt_features.append(hill_transform(simulated_adstocked, opt_params['ks'][i], opt_params['ss'][i]))
-            
-        mkt_pred_daily = mkt_model.predict(mkt_scaler.transform([mkt_features]))[0]
-        
-        # Combine organic baseline with predicted marketing lift
-        total_kpi_daily = organic_baseline_mean + mkt_pred_daily
-        
+        return organic_baseline_mean + mkt_model.predict(mkt_scaler.transform([mkt_features]))[0]
+
+    # Baseline using Historical Mix
+    baseline_kpi = simulate_kpi(total_avg_daily_spend, historical_mix)
+    baseline_point = {
+        'Scenario': 'Cenário Atual',
+        'Daily_Investment': total_avg_daily_spend,
+        'Projected_Total_KPIs': baseline_kpi,
+        'projected_kpis': {
+            'Média Histórica': baseline_kpi,
+            'Pico de Eficiência': simulate_kpi(total_avg_daily_spend, optimized_mix),
+            'Modelo de Elasticidade': simulate_kpi(total_avg_daily_spend, strategic_mix)
+        }
+    }
+
+    # Generate curve using the Strategic Mix (Elasticity optimal path)
+    simulation_results = []
+    for m in multipliers:
+        current_total_daily_spend = total_avg_daily_spend * m
+        total_kpi_daily = simulate_kpi(current_total_daily_spend, strategic_mix)
+        historical_kpi_daily = simulate_kpi(current_total_daily_spend, historical_mix)
+        optimized_kpi_daily = simulate_kpi(current_total_daily_spend, optimized_mix)
         simulation_results.append({
             'Daily_Investment': current_total_daily_spend,
-            'Projected_Total_KPIs': total_kpi_daily
+            'Projected_Total_KPIs': total_kpi_daily,
+            'Projected_Total_KPIs_Historical': historical_kpi_daily,
+            'Projected_Total_KPIs_Optimized': optimized_kpi_daily
         })
         
     res_df = pd.DataFrame(simulation_results)
+    res_df['Incremental_KPI'] = (res_df['Projected_Total_KPIs'] - baseline_kpi).clip(lower=0)
+    res_df['Incremental_Investment'] = (res_df['Daily_Investment'] - total_avg_daily_spend).clip(lower=0)
     
-    # Keep strictly daily values for business reporting (presentation layer handles monthly scaling)
-    # Baseline (Current Spend)
-    baseline_idx = (np.abs(multipliers - 1.0)).argmin()
-    baseline_point = res_df.iloc[baseline_idx].to_dict()
-    baseline_point['Scenario'] = 'Cenário Atual'
-    
-    res_df['Incremental_KPI'] = (res_df['Projected_Total_KPIs'] - baseline_point['Projected_Total_KPIs']).clip(lower=0)
-    res_df['Incremental_Investment'] = (res_df['Daily_Investment'] - baseline_point['Daily_Investment']).clip(lower=0)
+    # NEW: Calculate exact channel splits per row to empower Streamlit UI Charting
+    for ch in strategic_mix.keys():
+        res_df[f'Spend_{ch}_Historical'] = res_df['Daily_Investment'] * historical_mix.get(ch, 0)
+        res_df[f'Spend_{ch}_Optimized'] = res_df['Daily_Investment'] * optimized_mix.get(ch, 0)
+        res_df[f'Spend_{ch}_Strategic'] = res_df['Daily_Investment'] * strategic_mix.get(ch, 0)
     
     optimization_target = config.get('optimization_target', 'REVENUE').upper()
     financial_targets = config.get('financial_targets', {})
@@ -409,7 +418,7 @@ def generate_aggregated_response_curve(elasticity_results, config):
     if optimization_target == 'REVENUE':
         conversion_rate = config.get('conversion_rate_from_kpi_to_bo', 0)
         avg_ticket = config.get('average_ticket', 0)
-        baseline_revenue = baseline_point['Projected_Total_KPIs'] * conversion_rate * avg_ticket
+        baseline_revenue = baseline_kpi * conversion_rate * avg_ticket
         res_df['Projected_Revenue'] = res_df['Projected_Total_KPIs'] * conversion_rate * avg_ticket
         res_df['Incremental_Revenue'] = res_df['Projected_Revenue'] - baseline_revenue
         res_df['Incremental_ROI'] = (res_df['Incremental_Revenue'] / res_df['Incremental_Investment']).fillna(0)
@@ -418,66 +427,116 @@ def generate_aggregated_response_curve(elasticity_results, config):
         res_df['iCPA'] = res_df['iCPA'].replace([np.inf, -np.inf], np.nan)
 
     # Max Efficiency Point
-    curve_segment = res_df[res_df['Daily_Investment'] >= baseline_point['Daily_Investment']].copy()
+    curve_segment = res_df[res_df['Daily_Investment'] >= total_avg_daily_spend].copy()
     if len(curve_segment) > 5:
-        x = curve_segment['Daily_Investment'].values
-        y = curve_segment['Projected_Total_KPIs'].values
-        x_norm = (x - x.min()) / (x.max() - x.min() + 1e-9)
-        y_norm = (y - y.min()) / (y.max() - y.min() + 1e-9)
-        distances = np.abs(y_norm - x_norm) / np.sqrt(2)
-        max_efficiency_idx = np.argmax(distances)
-        max_efficiency_point = curve_segment.iloc[max_efficiency_idx].to_dict()
+        if optimization_target == 'REVENUE' and 'Incremental_ROI' in curve_segment.columns:
+            max_efficiency_idx = curve_segment['Incremental_ROI'].idxmax()
+        else:
+            x = curve_segment['Daily_Investment'].values
+            y = curve_segment['Projected_Total_KPIs'].values
+            x_norm = (x - x.min()) / (x.max() - x.min() + 1e-9)
+            y_norm = (y - y.min()) / (y.max() - y.min() + 1e-9)
+            distances = np.abs(y_norm - x_norm) / np.sqrt(2)
+            max_efficiency_idx = curve_segment.index[np.argmax(distances)]
+            
+        max_eff_investment = curve_segment.loc[max_efficiency_idx, 'Daily_Investment']
     else:
-        max_efficiency_point = baseline_point.copy()
-    max_efficiency_point['Scenario'] = 'Máxima Eficiência'
+        max_eff_investment = total_avg_daily_spend
+
+    # Evaluate Max Efficiency Point using its specific Optimized Mix!
+    opt_kpi = simulate_kpi(max_eff_investment, optimized_mix)
+    inc_opt_kpi = max(0, opt_kpi - baseline_kpi)
+    inc_opt_inv = max(0, max_eff_investment - total_avg_daily_spend)
+    
+    max_efficiency_point = {
+        'Scenario': 'Máxima Eficiência',
+        'Daily_Investment': max_eff_investment,
+        'Projected_Total_KPIs': opt_kpi,
+        'Incremental_Investment': inc_opt_inv,
+        'Incremental_KPI': inc_opt_kpi,
+        'projected_kpis': {
+            'Média Histórica': simulate_kpi(max_eff_investment, historical_mix),
+            'Pico de Eficiência': opt_kpi,
+            'Modelo de Elasticidade': simulate_kpi(max_eff_investment, strategic_mix)
+        }
+    }
+    if optimization_target == 'REVENUE':
+        max_efficiency_point['Projected_Revenue'] = opt_kpi * conversion_rate * avg_ticket
+        max_efficiency_point['Incremental_Revenue'] = max(0, max_efficiency_point['Projected_Revenue'] - baseline_revenue)
+        max_efficiency_point['Incremental_ROI'] = max_efficiency_point['Incremental_Revenue'] / inc_opt_inv if inc_opt_inv > 0 else 0
+    
+    # --- NEW: Strategic Reallocation (Same Baseline Budget, Elasticity Mix) ---
+    reallocated_kpi = simulate_kpi(total_avg_daily_spend, strategic_mix)
+    strategic_reallocation_point = {
+        'Scenario': 'Realocação Estratégica',
+        'Daily_Investment': total_avg_daily_spend,
+        'Projected_Total_KPIs': reallocated_kpi,
+        'Incremental_Investment': 0,
+        'Incremental_KPI': max(0, reallocated_kpi - baseline_kpi),
+        'iCPA': 0,
+        'projected_kpis': {
+            'Média Histórica': baseline_kpi,
+            'Pico de Eficiência': simulate_kpi(total_avg_daily_spend, optimized_mix),
+            'Modelo de Elasticidade': reallocated_kpi
+        }
+    }
+    if optimization_target == 'REVENUE':
+        strategic_reallocation_point['Projected_Revenue'] = reallocated_kpi * conversion_rate * avg_ticket
+        strategic_reallocation_point['Incremental_Revenue'] = max(0, strategic_reallocation_point['Projected_Revenue'] - baseline_revenue)
+        inc_rev = strategic_reallocation_point['Incremental_Revenue']
+        strategic_reallocation_point['Incremental_ROI'] = float('inf') if inc_rev > 0 else 0
     
     # --- UNIVERSAL FINANCIAL FILTER LOGIC START ---
     strategic_limit_point = None
     
-    # Determine applicable filters
     max_cpa = financial_targets.get('target_cpa', float('inf'))
     max_icpa = financial_targets.get('target_icpa', float('inf'))
     min_roas = financial_targets.get('target_roas', 0)
     min_iroas = financial_targets.get('target_iroas', config.get('minimum_acceptable_iroi', 0))
 
-    # Start with all points higher than baseline
-    valid_points_df = res_df[res_df['Daily_Investment'] > baseline_point['Daily_Investment']].copy()
+    valid_points_df = res_df[res_df['Daily_Investment'] > total_avg_daily_spend].copy()
 
-    # Apply Conversion filters
     if optimization_target == 'CONVERSIONS' or max_cpa != float('inf') or max_icpa != float('inf'):
         if 'CPA' not in valid_points_df.columns:
             valid_points_df['CPA'] = (valid_points_df['Daily_Investment'] / valid_points_df['Projected_Total_KPIs']).fillna(0)
-        
         if max_cpa != float('inf'):
             valid_points_df = valid_points_df[valid_points_df['CPA'] <= max_cpa]
         if max_icpa != float('inf'):
             valid_points_df = valid_points_df[(valid_points_df['iCPA'] > 0) & (valid_points_df['iCPA'] <= max_icpa)]
 
-    # Apply Revenue filters
     if optimization_target == 'REVENUE' or min_roas > 0 or min_iroas > 0:
         if 'ROAS' not in valid_points_df.columns and 'Projected_Revenue' in valid_points_df.columns:
             valid_points_df['ROAS'] = (valid_points_df['Projected_Revenue'] / valid_points_df['Daily_Investment']).fillna(0)
-        
         if min_roas > 0 and 'ROAS' in valid_points_df.columns:
             valid_points_df = valid_points_df[valid_points_df['ROAS'] >= min_roas]
         if min_iroas > 0 and 'Incremental_ROI' in valid_points_df.columns:
             valid_points_df = valid_points_df[valid_points_df['Incremental_ROI'] >= min_iroas]
 
-    # Find the Strategic Limit: The maximum investment that satisfies all constraints
     if not valid_points_df.empty:
         strategic_limit_idx = valid_points_df['Daily_Investment'].idxmax()
         strategic_limit_point = res_df.loc[strategic_limit_idx].to_dict()
     # --- UNIVERSAL FINANCIAL FILTER LOGIC END ---
             
     if strategic_limit_point is None:
-        # Fallback if no valid points are found or limits aren't set
         limit_factor = config.get('investment_limit_factor', 1.5)
         strategic_limit_idx = (np.abs(multipliers - limit_factor)).argmin()
         strategic_limit_point = res_df.iloc[strategic_limit_idx].to_dict()
 
     strategic_limit_point['Scenario'] = 'Limite Estratégico'
+    strategic_limit_inv = strategic_limit_point['Daily_Investment']
+    strategic_limit_point['projected_kpis'] = {
+        'Média Histórica': simulate_kpi(strategic_limit_inv, historical_mix),
+        'Pico de Eficiência': simulate_kpi(strategic_limit_inv, optimized_mix),
+        'Modelo de Elasticidade': simulate_kpi(strategic_limit_inv, strategic_mix)
+    }
     
-    return res_df, baseline_point, max_efficiency_point, strategic_limit_point, None, None
+    # NEW: Export the DataFrame to a CSV so Streamlit can use it for interactability
+    if output_dir: # Only export if output_dir is provided
+        csv_out_path = os.path.join(output_dir, 'response_curve_data.csv')
+        res_df.to_csv(csv_out_path, index=False)
+        print(f"   - ✅ Simulation data exported for UI: {csv_out_path}")
+    
+    return res_df, baseline_point, max_efficiency_point, strategic_limit_point, None, None, strategic_reallocation_point
 
 
 if __name__ == "__main__":

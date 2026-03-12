@@ -31,7 +31,7 @@ from gemini_report import generate_html_report, generate_global_gemini_report
 from presentation import save_accuracy_plot, save_line_chart_plot, save_investment_bar_plot, save_sessions_bar_plot, save_opportunity_curve_plot, create_comparative_saturation_md, save_investment_distribution_donuts
 
 
-def _create_presentation_dataframe(causal_results, baseline_point, max_efficiency_point, diminishing_return_point, strategic_limit_point, config, post_period, channel_proportions):
+def _create_presentation_dataframe(causal_results, config, post_period):
     """Creates a DataFrame with all data points for the presentation CSV."""
     presentation_data = {}
     conversion_rate = config.get('conversion_rate_from_kpi_to_bo', 0)
@@ -61,47 +61,6 @@ def _create_presentation_dataframe(causal_results, baseline_point, max_efficienc
     presentation_data['causal_receita_incremental'] = causal_incremental_revenue
     presentation_data['causal_investimento_pre_evento'] = causal_results.get('total_investment_pre_period', 0)
     presentation_data['causal_investimento_durante_evento'] = causal_results.get('total_investment_post_period', 0)
-
-    # Projection Scenarios
-    def process_scenario(point, name, base_orders=0):
-        if not point: return {}
-        inv = point.get('Daily_Investment', 0) * 30
-        orders = point.get('Projected_Total_KPIs', 0) * conversion_rate
-        cpa_total = inv / orders if orders > 0 else 0
-        
-        inc_inv = point.get('Incremental_Investment', 0) * 30
-        inc_orders = point.get('Incremental_KPI', 0) * conversion_rate
-        icpa = (inc_inv / inc_orders) if inc_orders > 0 else 0
-        
-        data = {
-            f'proj_{name}_investimento_mensal': inv,
-            f'proj_{name}_pedidos_totais': orders,
-            f'proj_{name}_cpa_total': cpa_total,
-            f'proj_{name}_pedidos_incrementais': inc_orders,
-            f'proj_{name}_icpa': icpa
-        }
-
-        if config.get('optimization_target', 'REVENUE').upper() == 'REVENUE':
-            inc_rev = point.get('Incremental_Revenue', 0) * 30
-            iroi = (inc_rev / inc_inv) if inc_inv > 0 else 0
-            data[f'proj_{name}_receita_total'] = orders * avg_ticket
-            data[f'proj_{name}_iroi'] = iroi
-        else:
-            data[f'proj_{name}_receita_total'] = 0
-            data[f'proj_{name}_iroi'] = 0
-
-        if channel_proportions:
-            for channel, proportion in channel_proportions.items():
-                safe_channel_name = channel.replace(' ', '_').lower()
-                data[f'proj_{name}_investimento_mensal_{safe_channel_name}'] = inv * proportion
-
-        return data
-
-    base_orders = baseline_point.get('Projected_Total_KPIs', 0) * conversion_rate
-    presentation_data.update(process_scenario(baseline_point, 'atual'))
-    presentation_data.update(process_scenario(max_efficiency_point, 'maxima_eficiencia', base_orders))
-    presentation_data.update(process_scenario(diminishing_return_point, 'inflex', base_orders))
-    presentation_data.update(process_scenario(strategic_limit_point, 'limite_estrategico', base_orders))
 
     return pd.DataFrame(list(presentation_data.items()), columns=['Metrica', 'Valor'])
 
@@ -195,7 +154,7 @@ def main(config, args):
                             continue
 
                         # --- Optimization: R-squared threshold from config ---
-                        r_squared_threshold = config.get('r_squared_threshold', 0.6)
+                        r_squared_threshold = max(0.5, config.get('r_squared_threshold', 0.6))
                         
                         is_significant = results_data['p_value'] < config['p_value_threshold']
                         is_logical = (results_data['investment_change_pct'] > 0 and results_data['absolute_lift'] > 0) or \
@@ -242,19 +201,6 @@ def main(config, args):
                             event_channels = [ch.strip() for ch in product_group_for_report.split(',')]
                             filtered_investment_df = daily_investment_df[daily_investment_df['Product Group'].isin(event_channels)].copy()
 
-                            # --- New: Generate event-specific saturation curves and get results ---
-                            (
-                                full_response_curve_df, scenarios_df, baseline_point, 
-                                max_efficiency_point, diminishing_return_point, saturation_point, 
-                                strategic_limit_point, model_params, channel_proportions
-                            ) = saturation_curve.generate_event_saturation_curves(
-                                kpi_df, filtered_investment_df, trends_df, config, 
-                                product_group_for_report, event_output_dir
-                            )
-                            
-                            if max_efficiency_point is not None:
-                                results_data['forecast'] = max_efficiency_point
-
                             try:
                                 safe_pg_name = re.sub(r'[^\w-]', '_', product_group_for_report)
                                 file_base_name = f"{config['advertiser_name']}_{safe_pg_name}_{event['intervention_date']}"
@@ -272,13 +218,8 @@ def main(config, args):
                                 image_paths['sessions'] = os.path.join(event_output_dir, f"sessions_chart_{file_base_name}.png")
                                 save_sessions_bar_plot(analyzed_event['sessions_bar_df'], image_paths['sessions'], kpi_name=kpi_col)
 
-                                # --- New: Add path for the opportunity curve plot ---
-                                opportunity_plot_name = 'combined_event_saturation_curve.png' if len(product_group_for_report.split(',')) > 1 else f'{product_group_for_report.replace(" ", "_")}_saturation_curve.png'
-                                image_paths['opportunity'] = os.path.join(event_output_dir, 'saturation_curves', opportunity_plot_name)
-                                # --- End New ---
-
                                 # Generate and save the comprehensive presentation data CSV for this event
-                                presentation_df = _create_presentation_dataframe(results_data, baseline_point, max_efficiency_point, diminishing_return_point, strategic_limit_point, config, post_period, channel_proportions)
+                                presentation_df = _create_presentation_dataframe(results_data, config, post_period)
                                 csv_filename = os.path.join(event_output_dir, f"{file_base_name}_presentation_data.csv")
                                 presentation_df.to_csv(csv_filename, index=False, float_format='%.2f')
                                 print(f"   ✅ SUCCESS! Comprehensive data saved to: {csv_filename}")
@@ -287,13 +228,11 @@ def main(config, args):
 
                                 print(f"   - 🤖 Generating Strategic Narrative with Gemini...")
                                 try:
-                                    generate_html_report(gemini_client, results_data, config, image_paths, html_report_filename, market_analysis_df, analyzed_event['line_df'], scenarios_df, channel_proportions, csv_output_filename=csv_filename, correlation_matrix=correlation_matrix)
+                                    generate_html_report(gemini_client, results_data, config, image_paths, html_report_filename, market_analysis_df, analyzed_event['line_df'], csv_output_filename=csv_filename, correlation_matrix=correlation_matrix)
                                     successful_events.append(event_output_dir)
                                     print(f"   ✅ SUCCESS! View the Gemini HTML report here: {html_report_filename}")
                                 except Exception as e:
                                     print(f"   - ❌ ERROR: Could not generate or parse the narrative from Gemini. Details: {e}")
-
-                                recommendations.generate_recommendations_file(results_data, scenarios_df, config, event_output_dir, channel_proportions)
 
                             except Exception as e:
                                 print(f"❌ Report generation failed for this event: {e}")
@@ -319,11 +258,18 @@ def main(config, args):
             global_output_dir = os.path.join(base_output_dir, config['advertiser_name'], 'global_saturation_analysis')
             os.makedirs(global_output_dir, exist_ok=True)
 
+            # --- Prepare Data for Donut Charts and Tables ---
+            total_investment_per_channel = investment_pivot_df.drop(columns='Date').sum()
+            current_budget_split = (total_investment_per_channel / total_investment_per_channel.sum()).to_dict()
+            
+            optimized_budget_split = analysis.find_optimal_historical_mix(kpi_df, daily_investment_df)
+            if not optimized_budget_split: optimized_budget_split = {}
+
             # --- Generate and Save Aggregated Response Curve ---
             (
                 response_curve_df, baseline_point, max_efficiency_point, 
-                strategic_limit_point, diminishing_return_point, saturation_point
-            ) = mmm_analysis.generate_aggregated_response_curve(mmm_results, config)
+                strategic_limit_point, diminishing_return_point, saturation_point, strategic_reallocation_point
+            ) = mmm_analysis.generate_aggregated_response_curve(mmm_results, config, optimized_mix=optimized_budget_split, output_dir=global_output_dir)
             
             # --- DYNAMICALLY SET TOTAL INVESTMENT FROM MODEL BASELINE ---
             total_monthly_investment = 0
@@ -337,15 +283,9 @@ def main(config, args):
                 diminishing_return_point, saturation_point, plot_filename, 
                 kpi_name=config.get('performance_kpi_column', 'Sessions'),
                 strategic_limit_point=strategic_limit_point,
+                strategic_reallocation_point=strategic_reallocation_point,
                 config=config
             )
-            
-            # --- Prepare Data for Donut Charts and Tables ---
-            total_investment_per_channel = investment_pivot_df.drop(columns='Date').sum()
-            current_budget_split = (total_investment_per_channel / total_investment_per_channel.sum()).to_dict()
-            
-            optimized_budget_split = analysis.find_optimal_historical_mix(kpi_df, daily_investment_df)
-            if not optimized_budget_split: optimized_budget_split = {}
 
             # The MMM model returns contributions as percentages (0-100). Normalize to ratios (0-1).
             strategic_budget_split_pct = mmm_results['contribution_pct']
@@ -354,29 +294,41 @@ def main(config, args):
             scenarios = [
                 {
                     'title': 'Cenário de Investimento Atual',
+                    'description': 'Mantém o volume de investimento total idêntico à média histórica atual. Serve como linha de base para avaliarmos o ganho puro de eficiência ao alterar o mix.',
                     'total_investment': total_monthly_investment,
                     'splits': {
                         'Média Histórica': {k: v * total_monthly_investment for k, v in current_budget_split.items()},
                         'Pico de Eficiência': {k: v * total_monthly_investment for k, v in optimized_budget_split.items()},
                         'Modelo de Elasticidade': {k: v * total_monthly_investment for k, v in strategic_budget_split_ratio.items()}
+                    },
+                    'projected_kpis': {
+                        mix: kpi * 30 for mix, kpi in baseline_point.get('projected_kpis', {}).items()
                     }
                 },
                 {
                     'title': 'Cenário de Investimento Otimizado',
+                    'description': 'Escala o investimento total para o nível onde foi observado o maior pico de eficiência teórica antes da saturação acelerada.',
                     'total_investment': max_efficiency_point['Daily_Investment'] * 30,
                     'splits': {
                         'Média Histórica': {k: v * max_efficiency_point['Daily_Investment'] * 30 for k, v in current_budget_split.items()},
                         'Pico de Eficiência': {k: v * max_efficiency_point['Daily_Investment'] * 30 for k, v in optimized_budget_split.items()},
                         'Modelo de Elasticidade': {k: v * max_efficiency_point['Daily_Investment'] * 30 for k, v in strategic_budget_split_ratio.items()}
+                    },
+                    'projected_kpis': {
+                        mix: kpi * 30 for mix, kpi in max_efficiency_point.get('projected_kpis', {}).items()
                     }
                 },
                 {
                     'title': 'Cenário de Investimento Estratégico',
+                    'description': 'Expande o orçamento até o limite estratégico calculado pelo modelo de elasticidade, focado em maximizar o volume de resultados.',
                     'total_investment': strategic_limit_point['Daily_Investment'] * 30,
                     'splits': {
                         'Média Histórica': {k: v * strategic_limit_point['Daily_Investment'] * 30 for k, v in current_budget_split.items()},
                         'Pico de Eficiência': {k: v * strategic_limit_point['Daily_Investment'] * 30 for k, v in optimized_budget_split.items()},
                         'Modelo de Elasticidade': {k: v * strategic_limit_point['Daily_Investment'] * 30 for k, v in strategic_budget_split_ratio.items()}
+                    },
+                    'projected_kpis': {
+                        mix: kpi * 30 for mix, kpi in strategic_limit_point.get('projected_kpis', {}).items()
                     }
                 }
             ]
@@ -384,7 +336,8 @@ def main(config, args):
             kpi_projections = {
                 'current': baseline_point,
                 'optimized': max_efficiency_point,
-                'strategic': strategic_limit_point
+                'strategic': strategic_limit_point,
+                'reallocation': strategic_reallocation_point
             }
 
             # Create the comparative markdown file
@@ -395,7 +348,7 @@ def main(config, args):
             # --- Generate Global Gemini Report ---
             print("   - 🤖 Generating Global Strategic Narrative with Gemini...")
             try:
-                generate_global_gemini_report(gemini_client, config, scenarios, kpi_projections=kpi_projections)
+                generate_global_gemini_report(gemini_client, config, scenarios, total_investment=total_monthly_investment, kpi_projections=kpi_projections)
                 print(f"   ✅ SUCCESS! Global strategic analysis complete.")
             except Exception as e:
                 print(f"   - ❌ ERROR: Could not generate or parse the global narrative from Gemini. Details: {e}")
@@ -405,13 +358,16 @@ def main(config, args):
 
     except FileNotFoundError as e:
         print(f"❌ ERROR: Input file not found. Please check the path in your config file. Details: {e}")
+        exit(1)
 
     except ValueError as e:
         print(f"❌ ERROR: A data validation or processing error occurred. Details: {e}")
+        exit(1)
 
     except Exception as e:
         print(f"❌ A critical, unexpected error occurred during the main process: {e}")
         traceback.print_exc()
+        exit(1)
 
 
 if __name__ == "__main__":
