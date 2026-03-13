@@ -61,29 +61,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-if 'user_email' not in st.session_state:
-    st.session_state['user_email'] = None
 
-if not st.session_state['user_email']:
-    st.title("Login - Opportunity Engine")
-    st.markdown("Bem-vindo! Por favor, identifique-se com seu email corporativo para acessar a ferramenta.")
-    with st.form("login_form"):
-        email = st.text_input("Email Corporativo (@google.com)")
-        submit = st.form_submit_button("Entrar", type="primary")
-        if submit:
-            if email.strip().lower().endswith("@google.com"):
-                st.session_state['user_email'] = email.strip().lower()
-                logger.info(json.dumps({"event": "App Opened", "user": st.session_state['user_email']}))
-                st.rerun()
-            else:
-                st.error("Acesso restrito a emails @google.com.")
-    st.stop()
-
-# Visual ID in sidebar
-st.sidebar.caption(f"Logado como: {st.session_state['user_email']}")
-if st.sidebar.button("Sair (Logout)"):
-    st.session_state['user_email'] = None
-    st.rerun()
 
 st.title("Max Opportunity Engine")
 st.markdown("Explore alocações de orçamento ótimas, preveja retornos de KPI e encontre interativamente seu cenário ideal.")
@@ -272,7 +250,6 @@ with tab1:
             
             logger.info(json.dumps({
                 "event": "Execution Run",
-                "user": st.session_state.get('user_email', 'unknown'),
                 "project": advertiser_name,
                 "kpi": kpi_column
             }))
