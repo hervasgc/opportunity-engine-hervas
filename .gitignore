@@ -20,17 +20,13 @@ __pycache__/
 !scripts/presentation.py
 !scripts/recommendations.py
 
-# Ignore markdown files by default
-*.md
-
 # Allow documentation and requirements
 !README.md
 !CUSTOMIZATION.md
 !requirements.txt
 
-# Ignore sandbox files
-sandbox.py
-backup/
-# Sensitive data and inputs
-#detected_events.csv
-#inputs/
+# Sensitive data and personal inputs
+.env
+outputs/
+inputs/*
+!inputs/Ecommerce_Demo/

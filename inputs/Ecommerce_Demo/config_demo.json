@@ -1,0 +1,46 @@
+{
+  "advertiser_name": "Ecommerce_Demo",
+  "client_industry": "Electronics",
+  "client_business_goal": "Optimize purchases for electronics e-commerce.",
+  "primary_business_metric_name": "Purchases",
+  "investment_file_path": "sample_data/investment.csv",
+  "performance_file_path": "sample_data/performance.csv",
+  "generic_trends_file_path": "sample_data/trends.csv",
+  "output_directory": "outputs/",
+  "performance_kpi_column": "Purchases",
+  "average_ticket": 1000,
+  "conversion_rate_from_kpi_to_bo": 1.0,
+  "financial_targets": {
+    "target_cpa": 100.0,
+    "target_icpa": 150.0
+  },
+  "optimization_target": "CONVERSIONS",
+  "investment_limit_factor": 2.0,
+  "p_value_threshold": 0.1,
+  "r_squared_threshold": 0.5,
+  "increase_threshold_percent": 20,
+  "decrease_threshold_percent": 10,
+  "post_event_days": 14,
+  "max_events_to_analyze": 5,
+  "treat_outliers": false,
+  "date_formats": {
+    "investment_file": "%Y-%m-%d",
+    "performance_file": "%Y-%m-%d",
+    "generic_trends_file": "%Y-%m-%d"
+  },
+  "column_mapping": {
+    "investment_file": {
+      "date_col": "dates",
+      "channel_col": "product_group",
+      "investment_col": "total_revenue"
+    },
+    "performance_file": {
+      "date_col": "date",
+      "kpi_col": "Purchases"
+    },
+    "generic_trends_file": {
+      "date_col": "Day",
+      "trends_col": "Smartphone Searches"
+    }
+  }
+}
