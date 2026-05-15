@@ -176,31 +176,41 @@ with tab1:
                     with open(trends_path, "wb") as f: f.write(trends_file.getbuffer())
                     
                 import pandas as pd
-                def get_date_col(file_path):
-                    if not file_path: return "date"
+                def get_column_by_names(file_path, possible_names, default="column"):
+                    if not file_path: return default
                     try:
                         df = pd.read_csv(file_path, nrows=0)
                         for col in df.columns:
-                            if col.lower() in ['date', 'dates', 'data', 'day', 'dia']:
+                            if col.lower() in [n.lower() for n in possible_names]:
                                 return col
-                        return df.columns[0]
+                        return df.columns[0] if len(df.columns) > 0 else default
                     except:
-                        return "date"
+                        return default
                 
-                inv_date = get_date_col(inv_path)
-                perf_date = get_date_col(perf_path)
-                trends_date = get_date_col(trends_path) if trends_path else "Day"
+                inv_date = get_column_by_names(inv_path, ['date', 'dates', 'data', 'day', 'dia'], "date")
+                perf_date = get_column_by_names(perf_path, ['date', 'dates', 'data', 'day', 'dia'], "date")
+                trends_date = get_column_by_names(trends_path, ['date', 'dates', 'data', 'day', 'dia', 'Day'], "Day") if trends_path else "Day"
+                
+                # Detect KPI column automatically if the user didn't change the default "Sessions"
+                detected_kpi = kpi_column
+                if kpi_column == "Sessions":
+                    detected_kpi = get_column_by_names(perf_path, ['Sessions', 'Purchases', 'Conversions', 'Leads', 'Vendas', 'Purchase'], "Sessions")
+                
+                # Detect Trends column automatically
+                detected_trends = "Ad Opportunities"
+                if trends_path:
+                    detected_trends = get_column_by_names(trends_path, ['Ad Opportunities', 'Smartphone Searches', 'Trends', 'Search Volume', 'Volume'], "Ad Opportunities")
 
                 dynamic_config = {
                   "advertiser_name": f"{safe_adv_name}_dynamic",
                   "client_industry": "Dynamic Execution",
                   "client_business_goal": "Optimize through Streamlit",
-                  "primary_business_metric_name": kpi_column,
+                  "primary_business_metric_name": detected_kpi,
                   "investment_file_path": inv_path,
                   "performance_file_path": perf_path,
                   "generic_trends_file_path": trends_path if trends_path else None,
                   "output_directory": "outputs/",
-                  "performance_kpi_column": kpi_column,
+                  "performance_kpi_column": detected_kpi,
                   "average_ticket": avg_ticket,
                   "conversion_rate_from_kpi_to_bo": conversion_rate,
                   "financial_targets": {
@@ -231,11 +241,11 @@ with tab1:
                     },
                     "performance_file": {
                       "date_col": perf_date,
-                      "kpi_col": kpi_column
+                      "kpi_col": detected_kpi
                     },
                     "generic_trends_file": {
                       "date_col": trends_date,
-                      "trends_col": "Ad Opportunities"
+                      "trends_col": detected_trends
                     }
                   }
                 }
