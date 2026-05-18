@@ -27,6 +27,12 @@ __pycache__/
 
 # Sensitive data and personal inputs
 .env
+config.json
 outputs/
 inputs/*
 !inputs/Ecommerce_Demo/
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+

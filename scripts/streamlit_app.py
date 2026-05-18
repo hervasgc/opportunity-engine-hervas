@@ -132,6 +132,8 @@ with tab1:
         with col1:
             st.subheader("Configurações Gerais")
             advertiser_name = st.text_input("Nome do Projeto (Anunciante)", value="Meu_Projeto_Dynamic")
+            client_industry = st.text_input("Setor do Cliente (Ex: Varejo, Tecnologia)", value="Varejo")
+            client_business_goal = st.text_input("Objetivo de Negócio (Ex: Maximizar ROI)", value="Maximizar Eficiência")
             gemini_key = st.text_input("Gemini API Key", type="password", help="Necessária para geração de insights automáticos.")
             
             st.subheader("Dados Brutos (CSV)")
@@ -203,8 +205,8 @@ with tab1:
 
                 dynamic_config = {
                   "advertiser_name": f"{safe_adv_name}_dynamic",
-                  "client_industry": "Dynamic Execution",
-                  "client_business_goal": "Optimize through Streamlit",
+                  "client_industry": client_industry,
+                  "client_business_goal": client_business_goal,
                   "primary_business_metric_name": detected_kpi,
                   "investment_file_path": inv_path,
                   "performance_file_path": perf_path,
